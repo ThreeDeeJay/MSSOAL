@@ -121,7 +121,7 @@ static bool IsElevated()
     TOKEN_ELEVATION elev = {};
     DWORD sz = sizeof(elev);
     bool elevated = false;
-    if (QueryTokenInformation(tok, TokenElevation, &elev, sz, &sz))
+    if (GetTokenInformation(tok, TokenElevation, &elev, sz, &sz))
         elevated = (elev.TokenIsElevated != 0);
     CloseHandle(tok);
     return elevated;

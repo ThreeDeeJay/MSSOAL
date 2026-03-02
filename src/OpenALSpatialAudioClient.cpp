@@ -232,6 +232,7 @@ HRESULT OpenALSpatialAudioClientImpl::OpenALDevice(const std::wstring& deviceId)
     if (!ctx_) {
         ALCenum err = alcGetError(device_);
         OAL_LOG(L"alcCreateContext failed: " << err);
+        (void)err;   // suppress C4189 in Release where OAL_LOG is a no-op
         alcCloseDevice(device_);
         device_ = nullptr;
         return E_FAIL;
@@ -266,11 +267,11 @@ HRESULT OpenALSpatialAudioClientImpl::ConfigureHRTF(const HRTFConfig& cfg)
 
     // Enumerate available HRTF datasets
     if (alcIsExtensionPresent(device_, "ALC_SOFT_HRTF")) {
-        // alcGetStringiSOFT is an extension function – must be loaded at runtime
-        typedef const ALCchar* (ALC_APIENTRY* LPALCGETSTRINGISOFT)(
+        // alcGetStringiSOFT is an extension function -- must be loaded at runtime
+        typedef const ALCchar* (ALC_APIENTRY* PFN_alcGetStringiSOFT)(
             ALCdevice*, ALCenum, ALCsizei);
-        LPALCGETSTRINGISOFT alcGetStringiSOFT =
-            reinterpret_cast<LPALCGETSTRINGISOFT>(
+        PFN_alcGetStringiSOFT alcGetStringiSOFT =
+            reinterpret_cast<PFN_alcGetStringiSOFT>(
                 alcGetProcAddress(device_, "alcGetStringiSOFT"));
 
         ALCint numHrtf = 0;

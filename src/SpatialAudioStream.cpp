@@ -306,6 +306,7 @@ STDMETHODIMP SpatialAudioStreamImpl::GetAvailableDynamicObjectCount(UINT32* coun
 
 STDMETHODIMP SpatialAudioStreamImpl::GetService(REFIID riid, void** service)
 {
+    (void)riid;   // intentionally unsupported; suppress C4100
     if (!service) return E_POINTER;
     *service = nullptr;
     return E_NOINTERFACE;

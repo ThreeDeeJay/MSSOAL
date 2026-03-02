@@ -392,12 +392,11 @@ STDMETHODIMP SpatialAudioObjectImpl::QueryInterface(REFIID riid, void** ppv)
 
 STDMETHODIMP_(ULONG) SpatialAudioObjectImpl::Release()
 {
-    ULONG r = --refCount_;
-    if (r == 0) {
-        DestroyALResources();
-        delete this;
-    }
-    return r;
+    // Do NOT delete here. Memory is owned by the shared_ptr stored in
+    // SpatialAudioStreamImpl::objects_. The destructor runs when that
+    // shared_ptr is erased from the map, which already calls DestroyALResources().
+    // delete this here would cause a double-free.
+    return --refCount_;
 }
 
 } // namespace OpenALSpatial

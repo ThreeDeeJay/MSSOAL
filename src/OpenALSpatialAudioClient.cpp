@@ -163,8 +163,10 @@ private:
     UINT32     sampleRate_   = kDefaultSampleRate;
     UINT32     framesPerBuf_ = kDefaultFramesPerBuffer;
 
-    // Active stream (weak reference – the app holds the strong ref)
-    std::weak_ptr<SpatialAudioStreamImpl> activeStream_;
+    // Strong reference — keeps the stream alive for the lifetime of the client.
+    // A weak_ptr was wrong here: the local shared_ptr in ActivateSpatialAudioStream
+    // would drop to refcount 0 before the caller could use the returned pointer.
+    std::shared_ptr<SpatialAudioStreamImpl> activeStream_;
 
     // Enumerated HRTF names (populated in ConfigureHRTF)
     std::vector<std::string> hrtfNames_;
@@ -530,9 +532,8 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::ActivateSpatialAudioStream(
 STDMETHODIMP OpenALSpatialAudioClientImpl::SetObjectSpatialParams(
     ISpatialAudioObject* obj, const ObjectSpatialParams& params)
 {
-    auto stream = activeStream_.lock();
-    if (!stream) return AUDCLNT_E_SERVICE_NOT_RUNNING;
-    return stream->SetObjectSpatialParams(obj, params);
+    if (!activeStream_) return AUDCLNT_E_SERVICE_NOT_RUNNING;
+    return activeStream_->SetObjectSpatialParams(obj, params);
 }
 
 STDMETHODIMP OpenALSpatialAudioClientImpl::GetActiveHRTFName(

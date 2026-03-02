@@ -328,9 +328,10 @@ STDMETHODIMP SpatialAudioStreamImpl::QueryInterface(REFIID riid, void** ppv)
 
 STDMETHODIMP_(ULONG) SpatialAudioStreamImpl::Release()
 {
-    ULONG r = --refCount_;
-    if (r == 0) delete this;
-    return r;
+    // Do NOT delete here. Memory is owned by the shared_ptr stored in
+    // OpenALSpatialAudioClientImpl::activeStream_. Calling delete this
+    // while that shared_ptr is still alive causes a double-free.
+    return --refCount_;
 }
 
 // ─────────────────────────────────────────────────────────────

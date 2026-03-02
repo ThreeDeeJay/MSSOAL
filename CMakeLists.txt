@@ -23,35 +23,71 @@ option(OPENAL_SPATIAL_BUILD_SHARED    "Build as a shared DLL (for COM server)" O
 # Accepts OPENAL_INCLUDE_DIR and OPENAL_LIBRARY from CMake
 # command line, or falls back to vcpkg/environment defaults.
 # ──────────────────────────────────────────────────────────────
-find_package(OpenAL CONFIG QUIET)
-if (NOT OpenAL_FOUND)
-    # Manual fallback – set OPENAL_ROOT on the command line
-    if (NOT DEFINED OPENAL_ROOT)
-        set(OPENAL_ROOT "$ENV{OPENAL_ROOT}" CACHE PATH "OpenAL Soft root directory")
-    endif()
+# ── OpenAL Soft ────────────────────────────────────────────────────────────
+# Priority order:
+#   1. OPENAL_ROOT cmake/env variable  (CI sets this to the pre-built SDK dir)
+#   2. CONFIG-mode find_package        (vcpkg or system install)
+#   3. Well-known default install paths
+#
+# openal-soft is intentionally absent from vcpkg.json so CI can use the
+# official pre-built binary zip instead of compiling from source (~4-6 min).
+# See .github/workflows/build.yml for how OPENAL_ROOT is set in CI.
+
+# Honour an env-var so callers don't need to pass -DOPENAL_ROOT explicitly
+if (NOT DEFINED OPENAL_ROOT AND DEFINED ENV{OPENAL_ROOT})
+    set(OPENAL_ROOT "$ENV{OPENAL_ROOT}" CACHE PATH "OpenAL Soft root directory")
+endif()
+
+# If OPENAL_ROOT is set, search it first before anything else
+if (DEFINED OPENAL_ROOT)
     find_path(OPENAL_INCLUDE_DIR
         NAMES al.h alext.h efx.h efx-presets.h
         PATHS "${OPENAL_ROOT}/include/AL"
               "${OPENAL_ROOT}/include"
-              "C:/Program Files/OpenAL/include/AL"
-              "C:/OpenAL/include/AL"
-    )
+        NO_DEFAULT_PATH)
     find_library(OPENAL_LIBRARY
         NAMES OpenAL32 openal soft_oal
         PATHS "${OPENAL_ROOT}/lib"
+              "${OPENAL_ROOT}/libs/Win64"
               "${OPENAL_ROOT}/lib64"
-              "C:/Program Files/OpenAL/lib"
-              "C:/OpenAL/lib"
-    )
-    if (NOT OPENAL_INCLUDE_DIR OR NOT OPENAL_LIBRARY)
-        message(FATAL_ERROR
-            "OpenAL Soft not found. Install it from https://github.com/kcat/openal-soft/releases\n"
-            "or set OPENAL_ROOT to your installation prefix.")
+        NO_DEFAULT_PATH)
+    if (OPENAL_INCLUDE_DIR AND OPENAL_LIBRARY)
+        add_library(OpenAL::OpenAL UNKNOWN IMPORTED)
+        set_target_properties(OpenAL::OpenAL PROPERTIES
+            IMPORTED_LOCATION             "${OPENAL_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${OPENAL_INCLUDE_DIR}")
+        message(STATUS "OpenAL Soft (pre-built): ${OPENAL_LIBRARY}")
     endif()
-    add_library(OpenAL::OpenAL UNKNOWN IMPORTED)
-    set_target_properties(OpenAL::OpenAL PROPERTIES
-        IMPORTED_LOCATION "${OPENAL_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${OPENAL_INCLUDE_DIR}")
+endif()
+
+# Fall back to CONFIG-mode (vcpkg, system) if OPENAL_ROOT didn't resolve
+if (NOT TARGET OpenAL::OpenAL)
+    find_package(OpenAL CONFIG QUIET)
+    if (NOT OpenAL_FOUND)
+        find_path(OPENAL_INCLUDE_DIR
+            NAMES al.h alext.h efx.h efx-presets.h
+            PATHS "C:/Program Files/OpenAL/include/AL"
+                  "C:/OpenAL/include/AL")
+        find_library(OPENAL_LIBRARY
+            NAMES OpenAL32 openal soft_oal
+            PATHS "C:/Program Files/OpenAL/lib"
+                  "C:/OpenAL/lib")
+        if (NOT OPENAL_INCLUDE_DIR OR NOT OPENAL_LIBRARY)
+            message(FATAL_ERROR
+                "OpenAL Soft not found.\n"
+                "Download a pre-built SDK from:\n"
+                "  https://github.com/kcat/openal-soft/releases\n"
+                "then pass -DOPENAL_ROOT=<path> to CMake, or set the\n"
+                "OPENAL_ROOT environment variable.")
+        endif()
+        add_library(OpenAL::OpenAL UNKNOWN IMPORTED)
+        set_target_properties(OpenAL::OpenAL PROPERTIES
+            IMPORTED_LOCATION             "${OPENAL_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${OPENAL_INCLUDE_DIR}")
+        message(STATUS "OpenAL Soft (fallback paths): ${OPENAL_LIBRARY}")
+    else()
+        message(STATUS "OpenAL Soft (config): ${OpenAL_DIR}")
+    endif()
 endif()
 
 # ──────────────────────────────────────────────────────────────

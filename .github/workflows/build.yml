@@ -8,6 +8,8 @@ env:
   Configuration: Release
   Artifacts: build/Release
   Title: ${{github.event.repository.name}}
+  OPENAL_VERSION: "1.24.2"
+  OPENAL_ROOT: ${{ github.workspace }}/openal-sdk
 
 on:
   push:
@@ -32,22 +34,49 @@ jobs:
         echo "CommitCount=$(git rev-list --count HEAD)" >> $env:GITHUB_ENV
         echo "CommitDate=$(git show -s --date=format:'%Y-%m-%d' --format=%cd)" >> $env:GITHUB_ENV
 
-    - name: Install vcpkg
-      uses: lukka/run-vcpkg@v11.5
+    - name: Cache OpenAL Soft SDK
+      id: cache-openal
+      uses: actions/cache@v4
       with:
-        vcpkgGitCommitId: c2aeddd80357b17592e59ad965d2adf65a19b22f
-    - name: Install dependencies
+        path: ${{ env.OPENAL_ROOT }}
+        key: openal-soft-${{ env.OPENAL_VERSION }}-windows
+
+    - name: Download OpenAL Soft pre-built SDK
+      if: steps.cache-openal.outputs.cache-hit != 'true'
+      shell: pwsh
       run: |
-        vcpkg install openal-soft:x64-windows
+        $url = "https://github.com/kcat/openal-soft/releases/download/${{ env.OPENAL_VERSION }}/openal-soft-${{ env.OPENAL_VERSION }}-bin.zip"
+        Write-Host "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile openal.zip
+        Expand-Archive openal.zip -DestinationPath openal-extracted
+        # The zip contains a single versioned subdirectory -- flatten it.
+        $inner = Get-ChildItem openal-extracted | Select-Object -First 1
+        Move-Item $inner.FullName "${{ env.OPENAL_ROOT }}"
+        Write-Host "SDK extracted to ${{ env.OPENAL_ROOT }}"
+        Get-ChildItem "${{ env.OPENAL_ROOT }}" -Recurse | Select-Object FullName
 
     - name: List files
       run: ls -R
 
     - name: Configure
-      run: cmake -A "${{env.Platform}}" -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.Configuration}} -DCMAKE_TOOLCHAIN_FILE="vcpkg\scripts\buildsystems\vcpkg.cmake" #-DCMAKE_PREFIX_PATH=vcpkg\installed\x64-windows
+      run: cmake -A "${{env.Platform}}" -B ${{github.workspace}}/build -DOPENAL_ROOT="${{ env.OPENAL_ROOT }}"
 
     - name: Build
-      run: cmake --build ${{github.workspace}}/build --config ${{env.Configuration}}
+      run: cmake --build ${{github.workspace}}/build --config ${{env.Configuration}} --parallel
+
+    # ── Stage the runtime DLL next to the example binary ──────────────────
+    - name: Stage OpenAL32.dll
+      shell: pwsh
+      run: |
+        $dll = Get-ChildItem "${{ env.OPENAL_ROOT }}" -Recurse -Filter "OpenAL32.dll" |
+               Select-Object -First 1
+        if ($dll) {
+          Copy-Item $dll.FullName build/examples/Release/
+          Write-Host "Staged: $($dll.FullName)"
+        } else {
+          Write-Warning "OpenAL32.dll not found in SDK -- check OPENAL_VERSION or zip layout"
+          exit 1
+        }
 
     - name: List files
       run: ls -R

@@ -152,6 +152,7 @@ private:
     HRESULT OpenALDevice(const std::wstring& deviceId);
     HRESULT ConfigureHRTF(const HRTFConfig& cfg);
     bool    CheckALExtension(const char* ext);
+    bool    cfg_wants_hrtf() const;
 
     std::atomic<ULONG> refCount_{1};
 
@@ -263,13 +264,22 @@ HRESULT OpenALSpatialAudioClientImpl::ConfigureHRTF(const HRTFConfig& cfg)
 
     // Enumerate available HRTF datasets
     if (alcIsExtensionPresent(device_, "ALC_SOFT_HRTF")) {
+        // alcGetStringiSOFT is an extension function – must be loaded at runtime
+        typedef const ALCchar* (ALC_APIENTRY* LPALCGETSTRINGISOFT)(
+            ALCdevice*, ALCenum, ALCsizei);
+        LPALCGETSTRINGISOFT alcGetStringiSOFT =
+            reinterpret_cast<LPALCGETSTRINGISOFT>(
+                alcGetProcAddress(device_, "alcGetStringiSOFT"));
+
         ALCint numHrtf = 0;
         alcGetIntegerv(device_, ALC_NUM_HRTF_SPECIFIERS_SOFT, 1, &numHrtf);
         hrtfNames_.clear();
-        for (int i = 0; i < numHrtf; ++i) {
-            const ALCchar* name = alcGetStringiSOFT(device_,
-                ALC_HRTF_SPECIFIER_SOFT, i);
-            if (name) hrtfNames_.push_back(name);
+        if (alcGetStringiSOFT) {
+            for (int i = 0; i < numHrtf; ++i) {
+                const ALCchar* name = alcGetStringiSOFT(device_,
+                    ALC_HRTF_SPECIFIER_SOFT, i);
+                if (name) hrtfNames_.push_back(name);
+            }
         }
         OAL_LOG(L"Found " << numHrtf << L" HRTF dataset(s)");
     }
@@ -351,8 +361,10 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::GetStaticObjectPosition(
     case AudioObjectType_TopBackLeft:       *x=-1.0f; *y=1.0f; *z= 1.0f;break;
     case AudioObjectType_TopBackRight:      *x= 1.0f; *y=1.0f; *z= 1.0f;break;
     case AudioObjectType_BackCenter:        *x= 0.0f; *y=0.f; *z= 1.0f; break;
+#if defined(AudioObjectType_TopFrontCenter)
     case AudioObjectType_TopFrontCenter:    *x= 0.0f; *y=1.0f; *z=-1.0f;break;
     case AudioObjectType_TopBackCenter:     *x= 0.0f; *y=1.0f; *z= 1.0f;break;
+#endif
     default: return E_INVALIDARG;
     }
     return S_OK;
@@ -369,8 +381,11 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::GetNativeStaticObjectTypeMask(
             AudioObjectType_BackLeft    | AudioObjectType_BackRight    |
             AudioObjectType_TopFrontLeft| AudioObjectType_TopFrontRight|
             AudioObjectType_TopBackLeft | AudioObjectType_TopBackRight |
-            AudioObjectType_BackCenter  | AudioObjectType_TopFrontCenter|
-            AudioObjectType_TopBackCenter;
+            AudioObjectType_BackCenter
+#if defined(AudioObjectType_TopFrontCenter)
+            | AudioObjectType_TopFrontCenter | AudioObjectType_TopBackCenter
+#endif
+            ;
     return S_OK;
 }
 

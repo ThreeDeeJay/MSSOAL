@@ -76,8 +76,7 @@ std::shared_ptr<SpatialAudioStreamImpl> SpatialAudioStreamImpl::Create(
     const HRTFConfig& hrtfCfg,
     ISpatialAudioObjectRenderStreamNotify* notify)
 {
-    auto s = std::shared_ptr<SpatialAudioStreamImpl>(
-        new SpatialAudioStreamImpl());
+    auto s = std::make_shared<SpatialAudioStreamImpl>(PrivateToken{});
 
     s->device_  = device;
     s->ctx_     = ctx;
@@ -407,7 +406,14 @@ void SpatialAudioStreamImpl::RenderLoop()
         UploadAllObjects();
 
         // ── Notify app that next cycle can begin ─────────────
-        if (notify_) notify_->OnAvailableDynamicObjectCountChange(this);
+        if (notify_) {
+            UINT32 avail = maxDynObjects_ -
+                activeDynCount_.load(std::memory_order_relaxed);
+            notify_->OnAvailableDynamicObjectCountChange(
+                this,   // ISpatialAudioObjectRenderStreamBase* sender
+                0,      // LONGLONG hnsComplianceDeadlineTime
+                avail); // UINT32 availableDynamicObjectCountChange
+        }
 
         nextWake += period;
         // If we've fallen behind, resync

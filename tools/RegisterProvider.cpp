@@ -30,6 +30,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+// initguid.h must come before any DEFINE_GUID usage to make the
+// preprocessor emit actual variable definitions instead of extern decls.
+#include <initguid.h>
 #include <shlwapi.h>
 #include <iostream>
 #include <string>

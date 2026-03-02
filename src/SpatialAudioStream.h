@@ -106,8 +106,11 @@ public:
         ISpatialAudioObject* obj,
         const ObjectSpatialParams& p);
 
+    // ── Passkey for make_shared ───────────────────────────────
+    struct PrivateToken {};
+    explicit SpatialAudioStreamImpl(PrivateToken) {}
+
 private:
-    SpatialAudioStreamImpl() = default;
     ~SpatialAudioStreamImpl();
 
     // Rendering pump (runs on alThread_)

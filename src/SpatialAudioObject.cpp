@@ -5,6 +5,8 @@
  * True per-object HRTF is enforced via AL_SOURCE_SPATIALIZE_SOFT.
  * ============================================================
  */
+// Must come before any system headers to unlock M_PI on MSVC
+#define _USE_MATH_DEFINES
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -19,6 +21,12 @@
 #include <stdexcept>
 
 #include "SpatialAudioObject.h"
+
+// SPTLAUDCLNT_E_OBJECT_NOTVALID was added in a later Windows SDK revision.
+// Define a fallback so the code compiles against older SDKs too.
+#ifndef SPTLAUDCLNT_E_OBJECT_NOTVALID
+#define SPTLAUDCLNT_E_OBJECT_NOTVALID  ((HRESULT)0x88890020L)
+#endif
 
 #ifndef NDEBUG
 #include <sstream>
@@ -43,8 +51,9 @@ std::shared_ptr<SpatialAudioObjectImpl> SpatialAudioObjectImpl::Create(
     UINT32 framesPerBuffer,
     UINT32 numChannels)
 {
-    auto obj = std::shared_ptr<SpatialAudioObjectImpl>(
-        new SpatialAudioObjectImpl());
+    // Use make_shared with the public PrivateToken overload so MSVC
+    // doesn't choke on constructing a shared_ptr from a raw private-ctor pointer.
+    auto obj = std::make_shared<SpatialAudioObjectImpl>(PrivateToken{});
     obj->type_           = type;
     obj->sampleRate_     = sampleRate;
     obj->framesPerBuffer_= framesPerBuffer;

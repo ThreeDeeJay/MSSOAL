@@ -82,8 +82,13 @@ public:
     float Y() const { return pos_[1]; }
     float Z() const { return pos_[2]; }
 
+    // ── Passkey for make_shared ───────────────────────────────
+    // Allows std::make_shared<SpatialAudioObjectImpl> to work while
+    // still preventing accidental construction from outside this class.
+    struct PrivateToken {};
+    explicit SpatialAudioObjectImpl(PrivateToken) {}
+
 private:
-    SpatialAudioObjectImpl() = default;
     ~SpatialAudioObjectImpl();
 
     void InitALSource();

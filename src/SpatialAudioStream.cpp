@@ -28,7 +28,7 @@
 #include <stdexcept>
 #include <thread>
 
-#include "../include/SpatialAudioStream.h"
+#include "SpatialAudioStream.h"
 
 #ifndef NDEBUG
 #include <sstream>

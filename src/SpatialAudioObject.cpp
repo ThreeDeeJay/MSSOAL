@@ -18,7 +18,7 @@
 #include <cstring>
 #include <stdexcept>
 
-#include "../include/SpatialAudioObject.h"
+#include "SpatialAudioObject.h"
 
 #ifndef NDEBUG
 #include <sstream>

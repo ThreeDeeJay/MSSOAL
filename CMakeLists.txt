@@ -74,10 +74,15 @@ set(OPENAL_SPATIAL_SOURCES
     src/SpatialAudioStream.cpp
 )
 
-set(OPENAL_SPATIAL_HEADERS
+# Public API header (installed alongside the library)
+set(OPENAL_SPATIAL_PUBLIC_HEADERS
     include/OpenALSpatialAudioClient.h
-    include/SpatialAudioObject.h
-    include/SpatialAudioStream.h
+)
+
+# Internal implementation headers (live beside their .cpp files in src/)
+set(OPENAL_SPATIAL_PRIVATE_HEADERS
+    src/SpatialAudioObject.h
+    src/SpatialAudioStream.h
 )
 
 # ──────────────────────────────────────────────────────────────
@@ -86,7 +91,8 @@ set(OPENAL_SPATIAL_HEADERS
 if (OPENAL_SPATIAL_BUILD_SHARED)
     add_library(openal_spatial SHARED
         ${OPENAL_SPATIAL_SOURCES}
-        ${OPENAL_SPATIAL_HEADERS}
+        ${OPENAL_SPATIAL_PUBLIC_HEADERS}
+        ${OPENAL_SPATIAL_PRIVATE_HEADERS}
     )
     target_compile_definitions(openal_spatial PRIVATE
         OPENAL_SPATIAL_EXPORTS
@@ -99,14 +105,19 @@ if (OPENAL_SPATIAL_BUILD_SHARED)
 else()
     add_library(openal_spatial STATIC
         ${OPENAL_SPATIAL_SOURCES}
-        ${OPENAL_SPATIAL_HEADERS}
+        ${OPENAL_SPATIAL_PUBLIC_HEADERS}
+        ${OPENAL_SPATIAL_PRIVATE_HEADERS}
     )
 endif()
 
 target_include_directories(openal_spatial
     PUBLIC
+        # Consumers only see the public include/ directory
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        # Internal headers are resolved from src/ at build time only
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(openal_spatial
@@ -135,7 +146,7 @@ target_compile_definitions(openal_spatial PRIVATE
 # ──────────────────────────────────────────────────────────────
 if (OPENAL_SPATIAL_BUILD_REGISTER)
     add_executable(RegisterProvider
-        register/RegisterProvider.cpp
+        tools/RegisterProvider.cpp
     )
     target_compile_definitions(RegisterProvider PRIVATE
         WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
@@ -180,7 +191,7 @@ install(TARGETS openal_spatial
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
 )
-install(FILES ${OPENAL_SPATIAL_HEADERS}
+install(FILES ${OPENAL_SPATIAL_PUBLIC_HEADERS}
     DESTINATION include/openal-spatial
 )
 if (OPENAL_SPATIAL_BUILD_REGISTER)

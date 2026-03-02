@@ -64,10 +64,10 @@ jobs:
     - name: Build
       run: cmake --build ${{github.workspace}}/build --config ${{env.Configuration}} --parallel
 
-#    - name: Deploy
-#      shell: cmd
-#      run: |
-#        If exist "openal-sdk\bin\Win64\soft_oal.dll" (copy "openal-sdk\bin\Win64\soft_oal.dll" "${{env.Artifacts}}\OpenAL32.dll")
+    - name: Deploy
+      shell: cmd
+      run: |
+        If exist "openal-sdk\bin\Win64\soft_oal.dll" (copy "openal-sdk\bin\Win64\soft_oal.dll" "${{env.Artifacts}}\OpenAL32.dll")
 
     - name: List files
       run: ls -R

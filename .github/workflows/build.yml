@@ -8,7 +8,7 @@ env:
   Configuration: Release
   Artifacts: build/Release
   Title: ${{github.event.repository.name}}
-  OPENAL_VERSION: "1.24.2"
+  OPENAL_VERSION: "1.25.1"
   OPENAL_ROOT: ${{ github.workspace }}/openal-sdk
 
 on:
@@ -64,10 +64,10 @@ jobs:
     - name: Build
       run: cmake --build ${{github.workspace}}/build --config ${{env.Configuration}} --parallel
 
-    - name: Deploy - vcpkg
-      shell: cmd
-      run: |
-        If exist "openal-sdk\bin\Win64\soft_oal.dll" (copy "openal-sdk\bin\Win64\soft_oal.dll" "${{env.Artifacts}}\OpenAL32.dll")
+#    - name: Deploy
+#      shell: cmd
+#      run: |
+#        If exist "openal-sdk\bin\Win64\soft_oal.dll" (copy "openal-sdk\bin\Win64\soft_oal.dll" "${{env.Artifacts}}\OpenAL32.dll")
 
     - name: List files
       run: ls -R

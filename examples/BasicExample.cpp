@@ -23,8 +23,11 @@
 
 #include <cmath>
 #include <cstdio>
-#include <numbers>
+#include <thread>
 #include <vector>
+
+// std::numbers (C++20) not available in C++17 — define pi locally
+static constexpr float kPi = 3.14159265358979323846f;
 
 // Our OpenAL-backed client (same include as MS ISpatialAudioClient apps)
 #include "../include/OpenALSpatialAudioClient.h"
@@ -37,12 +40,12 @@ using Microsoft::WRL::ComPtr;
 static void GenerateSine(float* buf, UINT32 frames, float freq,
                           float sampleRate, float& phase)
 {
-    float phaseStep = 2.f * std::numbers::pi_v<float> * freq / sampleRate;
+    float phaseStep = 2.f * kPi * freq / sampleRate;
     for (UINT32 i = 0; i < frames; ++i) {
         buf[i] = 0.25f * std::sin(phase);
         phase += phaseStep;
-        if (phase > 2.f * std::numbers::pi_v<float>)
-            phase -= 2.f * std::numbers::pi_v<float>;
+        if (phase > 2.f * kPi)
+            phase -= 2.f * kPi;
     }
 }
 
@@ -173,8 +176,8 @@ int main()
     listener.upX  = 0.f; listener.upY  = 1.f; listener.upZ  =  0.f;
     listener.masterGain = 1.0f;
 
-    auto* extStream = static_cast<OpenALSpatial::SpatialAudioStreamImpl*>(
-        nullptr); // cast via extended interface if needed
+    // (SetListenerOrientation is available via IOpenALSpatialAudioClient
+    //  if you query it from the client, not the stream directly)
 
     DWORD stopSignal = 0;
     std::thread inputThread([&stopSignal] {
@@ -196,7 +199,7 @@ int main()
             if (!active) continue;
 
             // Orbit position (equally spaced, different radii per object)
-            float angle = orbAngle + i * (2.f * std::numbers::pi_v<float> / 4.f);
+            float angle = orbAngle + i * (2.f * kPi / 4.f);
             float radius = orbitRadius * (0.5f + 0.5f * (i % 2));
             float x = radius * std::cos(angle);
             float z = radius * std::sin(angle);
@@ -215,8 +218,8 @@ int main()
         stream->EndUpdatingAudioObjects();
 
         orbAngle += orbitSpeed * dt;
-        if (orbAngle > 2.f * std::numbers::pi_v<float>)
-            orbAngle -= 2.f * std::numbers::pi_v<float>;
+        if (orbAngle > 2.f * kPi)
+            orbAngle -= 2.f * kPi;
 
         // Sleep for roughly one buffer period
         Sleep((DWORD)(dt * 1000.f));

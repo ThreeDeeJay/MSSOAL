@@ -88,8 +88,11 @@ public:
     struct PrivateToken {};
     explicit SpatialAudioObjectImpl(PrivateToken) {}
 
-private:
+    // Destructor must be public so std::make_shared's control block
+    // can call it. Construction is still gated by PrivateToken above.
     ~SpatialAudioObjectImpl();
+
+private:
 
     void InitALSource();
     void DestroyALResources();

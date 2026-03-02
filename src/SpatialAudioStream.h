@@ -110,8 +110,11 @@ public:
     struct PrivateToken {};
     explicit SpatialAudioStreamImpl(PrivateToken) {}
 
-private:
+    // Destructor must be public so std::make_shared's control block
+    // can call it. Construction is still gated by PrivateToken above.
     ~SpatialAudioStreamImpl();
+
+private:
 
     // Rendering pump (runs on alThread_)
     void RenderLoop();

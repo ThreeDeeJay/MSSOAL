@@ -166,8 +166,9 @@ static bool UnregisterCOMServer(const GUID& clsid)
 // These functions run with SYSTEM privileges.
 // ---------------------------------------------------------------------------
 // Enable a named privilege in the current token.
+// Takes a narrow string (SE_BACKUP_NAME / SE_RESTORE_NAME are char* in the SDK).
 // Required before using REG_OPTION_BACKUP_RESTORE.
-static DWORD EnablePrivilege(const wchar_t* name)
+static DWORD EnablePrivilege(const char* name)
 {
     HANDLE tok = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(),
@@ -175,7 +176,7 @@ static DWORD EnablePrivilege(const wchar_t* name)
         return GetLastError();
 
     LUID luid{};
-    if (!LookupPrivilegeValueW(nullptr, name, &luid)) {
+    if (!LookupPrivilegeValueA(nullptr, name, &luid)) {
         DWORD err = GetLastError(); CloseHandle(tok); return err;
     }
     TOKEN_PRIVILEGES tp{};

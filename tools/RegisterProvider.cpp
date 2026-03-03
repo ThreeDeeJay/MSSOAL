@@ -36,8 +36,6 @@
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "advapi32.lib")
-#pragma comment(linker, \
-    "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
 
 // ---------------------------------------------------------------------------
 // Our provider CLSID {9A3B4C5D-6E7F-8901-ABCD-EF1234567890}

@@ -31,7 +31,7 @@
 #endif
 #include <windows.h>
 #include <unknwn.h>
-#include <spatialaudioclient.h>   // Windows SDK – ISpatialAudioClient
+#include <spatialaudioclient.h>   // Windows SDK - ISpatialAudioClient
 #include <audiosessiontypes.h>
 #include <mmreg.h>
 #include <wrl/client.h>
@@ -53,17 +53,17 @@
 
 namespace OpenALSpatial {
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Constants
-// ─────────────────────────────────────────────────────────────
+// -
 constexpr UINT32 kMaxDynamicObjects = 256;
 constexpr UINT32 kDefaultFramesPerBuffer = 480;   // 10 ms @ 48 kHz
 constexpr UINT32 kDefaultSampleRate = 48000;
 constexpr UINT32 kNumStreamingBuffers = 4;        // ring-buffer depth
 
-// ─────────────────────────────────────────────────────────────
+// -
 // HRTF configuration
-// ─────────────────────────────────────────────────────────────
+// -
 enum class HRTFMode {
     Default,       // Use OpenAL Soft's built-in MIT KEMAR dataset
     SOFA,          // Load a SOFA file (set sofaPath)
@@ -73,27 +73,27 @@ enum class HRTFMode {
 struct HRTFConfig {
     HRTFMode mode     = HRTFMode::Default;
     std::wstring sofaPath;          // Only used when mode == SOFA
-    float headRadius  = 0.09f;      // metres – used for ITD model
+    float headRadius  = 0.09f;      // metres - used for ITD model
     bool  enableReverb = true;      // EFX room-scale reverb
     float reverbMix    = 0.15f;
 };
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Distance attenuation model (per object overrideable)
-// ─────────────────────────────────────────────────────────────
+// -
 enum class DistanceModel {
     None,
     InverseDistance,
-    InverseDistanceClamped,   // Default – mirrors real-world
+    InverseDistanceClamped,   // Default - mirrors real-world
     LinearDistance,
     LinearDistanceClamped,
     ExponentDistance,
     ExponentDistanceClamped
 };
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Per-object spatial parameters (extended beyond MS API)
-// ─────────────────────────────────────────────────────────────
+// -
 struct ObjectSpatialParams {
     float x = 0.f, y = 0.f, z = 0.f;   // Metres, right-handed Y-up
     float velocityX = 0.f, velocityY = 0.f, velocityZ = 0.f;
@@ -109,9 +109,23 @@ struct ObjectSpatialParams {
                                         // global HRTF is disabled
 };
 
-// ─────────────────────────────────────────────────────────────
-// Factory — creates a fully initialised client
-// ─────────────────────────────────────────────────────────────
+// -
+// DLL export/import macro
+// When building openal_spatial.dll define OPENAL_SPATIAL_EXPORTS.
+// Consumers who link against the import lib get dllimport automatically.
+// -
+#if defined(_MSC_VER) || defined(__declspec)
+#  ifdef OPENAL_SPATIAL_EXPORTS
+#    define OPENAL_SPATIAL_API __declspec(dllexport)
+#  else
+#    define OPENAL_SPATIAL_API __declspec(dllimport)
+#  endif
+#else
+#  define OPENAL_SPATIAL_API
+#endif
+
+
+OPENAL_SPATIAL_API
 Microsoft::WRL::ComPtr<ISpatialAudioClient> CreateClient(
     const HRTFConfig& cfg   = {},
     const std::wstring& deviceId = L""  // empty = default output device
@@ -143,9 +157,9 @@ IOpenALSpatialAudioClient : public ISpatialAudioClient
     virtual ALCcontext* STDMETHODCALLTYPE GetALCContext() = 0;
 };
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Listener orientation helper (call once per frame)
-// ─────────────────────────────────────────────────────────────
+// -
 struct ListenerOrientation {
     // Forward vector (normalized)
     float fwdX = 0.f, fwdY = 0.f, fwdZ = -1.f;

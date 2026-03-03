@@ -198,7 +198,11 @@ if (OPENAL_SPATIAL_BUILD_REGISTER)
         advapi32 shlwapi
     )
     set_target_properties(RegisterProvider PROPERTIES
-        WIN32_EXECUTABLE FALSE   # Console app (not GUI)
+        WIN32_EXECUTABLE FALSE
+        # Embed the manifest file directly. This is the reliable approach --
+        # the /MANIFESTUAC linker flag has unfixable quote-escaping issues
+        # when passed through CMake on all generator types.
+        VS_MANIFEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/tools/RegisterProvider.manifest"
     )
 endif()
 

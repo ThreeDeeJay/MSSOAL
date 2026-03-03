@@ -591,6 +591,7 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::SetHRTFDataset(UINT32 index)
 // -
 // Public factory
 // -
+OPENAL_SPATIAL_API
 Microsoft::WRL::ComPtr<ISpatialAudioClient> CreateClient(
     const HRTFConfig& cfg,
     const std::wstring& deviceId)

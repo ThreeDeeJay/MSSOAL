@@ -355,9 +355,19 @@ static VOID WINAPI SvcMain(DWORD, LPWSTR*)
     } else if (wcscmp(p->verb, L"delete") == 0) {
         EnablePrivilege(SE_BACKUP_NAME);
         EnablePrivilege(SE_RESTORE_NAME);
-        std::wstring key = std::wstring(kMMDevicesPath) + L"\\" +
-                           GuidToString(p->clsid);
-        LONG r = RegDeleteTreeW(HKEY_LOCAL_MACHINE, key.c_str());
+        // Must open the PARENT key with REG_OPTION_BACKUP_RESTORE first.
+        // RegDeleteTreeW(HKLM, fullPath) re-opens the parent via normal DACL
+        // checks and hits ERROR_ACCESS_DENIED even with privileges active.
+        // Opening the parent explicitly with REG_OPTION_BACKUP_RESTORE and
+        // then deleting the child subkey from that handle bypasses the DACL.
+        HKEY hParent = nullptr;
+        LONG r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kMMDevicesPath,
+                     REG_OPTION_BACKUP_RESTORE, KEY_WRITE, &hParent);
+        if (r == ERROR_SUCCESS) {
+            std::wstring cs = GuidToString(p->clsid);
+            r = RegDeleteTreeW(hParent, cs.c_str());
+            RegCloseKey(hParent);
+        }
         rc = (r == ERROR_SUCCESS || r == ERROR_FILE_NOT_FOUND)
              ? ERROR_SUCCESS : (DWORD)r;
     } else {
@@ -495,26 +505,109 @@ static void Diagnose()
     wprintf(L"  Elevation : %s\n\n",
         IsElevated() ? L"YES (elevated)" : L"NO  -- re-run as Administrator");
 
+    // ---- Registry access ----
     struct Test { const wchar_t* label; const wchar_t* path; REGSAM access; };
     Test tests[] = {
         { L"MMDevices (read) ", kMMDevicesPath, KEY_READ  },
         { L"MMDevices (write)", kMMDevicesPath, KEY_WRITE },
-        { L"COM Classes(write", kCOMBase,        KEY_WRITE },
+        { L"COM Classes(write)", kCOMBase,      KEY_WRITE },
     };
+    wprintf(L"  Registry access:\n");
     for (auto& t : tests) {
         HKEY hk = nullptr;
         LONG r  = RegOpenKeyExW(HKEY_LOCAL_MACHINE, t.path, 0, t.access, &hk);
         if (r == ERROR_SUCCESS) {
-            wprintf(L"  %-22s: accessible\n", t.label);
+            wprintf(L"  %-24s: accessible\n", t.label);
             RegCloseKey(hk);
         } else {
-            wprintf(L"  %-22s: error %lu (%s)\n",
+            wprintf(L"  %-24s: error %lu (%s)\n",
                     t.label, (DWORD)r, Win32Msg((DWORD)r).c_str());
         }
     }
-    wprintf(L"\n  MMDevices (write) failing is expected even as Administrator.\n"
-            L"  The 'register' command installs a one-shot LocalSystem service\n"
-            L"  to bypass this ACL, exactly as Dolby Atmos does.\n");
+
+    // ---- COM registration ----
+    wprintf(L"\n  COM InProcServer32 registered:\n");
+    wchar_t clsidStr[64] = {};
+    StringFromGUID2(CLSID_OpenALSpatialProvider, clsidStr, 64);
+    std::wstring inprocPath = std::wstring(kCOMBase) + L"\\" + clsidStr
+                            + L"\\InProcServer32";
+    std::wstring dllPath = RegReadStr(HKEY_LOCAL_MACHINE,
+                                      inprocPath.c_str(), nullptr);
+    if (dllPath.empty()) {
+        wprintf(L"  [MISSING] Run 'register' first.\n");
+    } else {
+        wprintf(L"  DLL path : %s\n", dllPath.c_str());
+        // Check the DLL file itself exists
+        bool fileOk = (GetFileAttributesW(dllPath.c_str()) !=
+                       INVALID_FILE_ATTRIBUTES);
+        wprintf(L"  DLL file : %s\n",
+                fileOk ? L"found" : L"NOT FOUND -- path in registry is wrong");
+    }
+
+    // ---- DLL load test ----
+    // audiosrv loads the DLL in a restricted environment. Test here whether
+    // all dependencies resolve -- this is the most common silent failure.
+    wprintf(L"\n  DLL load test (simulates what audiosrv does):\n");
+    if (!dllPath.empty()) {
+        // LOAD_LIBRARY_AS_DATAFILE would not resolve imports; we want a full load.
+        HMODULE hm = LoadLibraryExW(dllPath.c_str(), nullptr,
+                                    LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (hm) {
+            wprintf(L"  [OK]  LoadLibraryEx succeeded.\n");
+            // Verify the required exports are present
+            const char* exports[] = {
+                "DllGetClassObject", "DllCanUnloadNow",
+                "DllRegisterServer", "DllUnregisterServer"
+            };
+            for (auto* exp : exports) {
+                bool found = (GetProcAddress(hm, exp) != nullptr);
+                wprintf(L"  %-26S: %s\n", exp,
+                        found ? L"exported" : L"MISSING -- COM will fail");
+            }
+            FreeLibrary(hm);
+        } else {
+            DWORD err = GetLastError();
+            wprintf(L"  [FAIL] LoadLibraryEx error %lu (%s)\n",
+                    err, Win32Msg(err).c_str());
+            // Error 126 = "The specified module could not be found"
+            // This means a DEPENDENCY DLL is missing, not the DLL itself.
+            if (err == ERROR_MOD_NOT_FOUND) {
+                wprintf(L"\n  >>> Most likely cause: OpenAL32.dll (or soft_oal.dll)\n"
+                        L"  >>> is not in a directory that audiosrv can search.\n"
+                        L"  >>> Fix: copy OpenAL32.dll to the same folder as\n"
+                        L"  >>>   openal_spatial.dll, OR copy it to:\n"
+                        L"  >>>   C:\\Windows\\System32\\OpenAL32.dll\n"
+                        L"  >>> Then re-run: net stop audiosrv && net start audiosrv\n");
+            }
+        }
+    }
+
+    // ---- CoCreateInstance test ----
+    // If the DLL loaded above but CoCreateInstance still fails, the class
+    // factory has a bug.  If it succeeds here but not in audiosrv, the issue
+    // is the service's restricted token or missing dependency in Session 0.
+    wprintf(L"\n  CoCreateInstance test (ISpatialAudioClient):\n");
+    if (!dllPath.empty()) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        IUnknown* punk = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_OpenALSpatialProvider,
+                                      nullptr, CLSCTX_INPROC_SERVER,
+                                      __uuidof(IUnknown), (void**)&punk);
+        if (SUCCEEDED(hr) && punk) {
+            wprintf(L"  [OK]  CoCreateInstance succeeded -- COM activation works.\n");
+            punk->Release();
+        } else {
+            wprintf(L"  [FAIL] hr=0x%08X  ", (unsigned)hr);
+            if (hr == REGDB_E_CLASSNOTREG)
+                wprintf(L"CLSID not registered -- run 'register' first.\n");
+            else if (hr == (HRESULT)0x8007007E || hr == (HRESULT)0x80070002)
+                wprintf(L"DLL or dependency not found (error 126/2).\n"
+                        L"  Copy OpenAL32.dll to System32 or beside openal_spatial.dll.\n");
+            else
+                wprintf(L"%s\n", Win32Msg((DWORD)hr).c_str());
+        }
+        CoUninitialize();
+    }
 }
 
 // ---------------------------------------------------------------------------

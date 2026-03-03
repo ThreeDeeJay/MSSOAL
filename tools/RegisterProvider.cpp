@@ -227,7 +227,11 @@ struct SvcPayload {
     GUID    clsid;
 };
 
-static const wchar_t* kShmName = L"Local\\OALSpatialRegPayload";
+// Services run in Session 0; the launcher runs in the interactive session.
+// "Local\" shared memory is session-scoped, so Session 0 cannot open it.
+// "Global\" crosses the session boundary -- LocalSystem has the required
+// SeCreateGlobalPrivilege to open Global objects unconditionally.
+static const wchar_t* kShmName = L"Global\\OALSpatialRegPayload";
 
 static SERVICE_STATUS_HANDLE g_svcHandle = nullptr;
 static void SetSvcState(DWORD state, DWORD exitCode = NO_ERROR)
@@ -249,19 +253,43 @@ static VOID WINAPI SvcMain(DWORD, LPWSTR*)
     if (!g_svcHandle) return;
     SetSvcState(SERVICE_RUNNING);
 
-    // Open the shared memory written by the launcher
+    // Open the shared memory written by the launcher.
+    // Must use Global\ prefix -- services run in Session 0 and cannot
+    // access Local\ objects created in the interactive user session.
     HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, kShmName);
-    if (!hMap) { SetSvcState(SERVICE_STOPPED, GetLastError()); return; }
+    if (!hMap) {
+        DWORD err = GetLastError();
+        // Write to the Application event log so the caller can diagnose
+        HANDLE hEvt = RegisterEventSourceW(nullptr, L"Application");
+        if (hEvt) {
+            wchar_t msg[256];
+            swprintf_s(msg, L"OALSpatialReg: OpenFileMapping(%s) failed: %lu",
+                       kShmName, err);
+            const wchar_t* msgs[] = { msg };
+            ReportEventW(hEvt, EVENTLOG_ERROR_TYPE, 0, 0,
+                         nullptr, 1, 0, msgs, nullptr);
+            DeregisterEventSource(hEvt);
+        }
+        SetSvcState(SERVICE_STOPPED, err);
+        return;
+    }
 
     const SvcPayload* p = (const SvcPayload*)MapViewOfFile(
         hMap, FILE_MAP_READ, 0, 0, sizeof(SvcPayload));
-    if (!p) { CloseHandle(hMap); SetSvcState(SERVICE_STOPPED, GetLastError()); return; }
+    if (!p) {
+        DWORD err = GetLastError();
+        CloseHandle(hMap);
+        SetSvcState(SERVICE_STOPPED, err);
+        return;
+    }
 
     DWORD rc = NO_ERROR;
     if (wcscmp(p->verb, L"write") == 0) {
         if (!WriteMMDevicesKey(p->dll, p->clsid)) rc = ERROR_FUNCTION_FAILED;
     } else if (wcscmp(p->verb, L"delete") == 0) {
         if (!DeleteMMDevicesKey(p->clsid)) rc = ERROR_FUNCTION_FAILED;
+    } else {
+        rc = ERROR_INVALID_PARAMETER;
     }
 
     UnmapViewOfFile(p);
@@ -349,8 +377,11 @@ static bool RunAsService(const wchar_t* verb,
         ok = (ss.dwCurrentState == SERVICE_STOPPED &&
               ss.dwWin32ExitCode == NO_ERROR);
         if (!ok) {
-            wprintf(L"  [FAIL] Service exited with state=%lu code=%lu\n",
-                    ss.dwCurrentState, ss.dwWin32ExitCode);
+            wprintf(L"  [FAIL] Service stopped with state=%lu exitCode=%lu (%s)\n"
+                    L"         Check Event Viewer -> Windows Logs -> Application\n"
+                    L"         for 'OALSpatialReg' entries with more detail.\n",
+                    ss.dwCurrentState, ss.dwWin32ExitCode,
+                    Win32Msg(ss.dwWin32ExitCode).c_str());
         }
     }
 

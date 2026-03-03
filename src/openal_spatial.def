@@ -1,0 +1,12 @@
+; openal_spatial.def
+; Explicit export table for the COM DLL entry points.
+; Using a .def file guarantees the symbols are exported by their exact names
+; (no C++ name mangling) regardless of __declspec(dllexport) visibility rules.
+
+LIBRARY openal_spatial
+
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE

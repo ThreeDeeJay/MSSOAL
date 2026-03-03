@@ -30,7 +30,7 @@
 #include "../include/OpenALSpatialAudioClient.h"
 #include "SpatialAudioStream.h"
 
-// ── Logging helper ────────────────────────────────────────────
+// - Logging helper -
 #ifndef NDEBUG
 #include <sstream>
 #define OAL_LOG(msg) \
@@ -43,7 +43,7 @@
 #define OAL_LOG(msg) (void)0
 #endif
 
-// ── Error helpers ─────────────────────────────────────────────
+// - Error helpers -
 #define OAL_CHECK(expr) \
     do { \
         ALenum _e = alGetError(); \
@@ -59,16 +59,16 @@
 
 namespace OpenALSpatial {
 
-// ═══════════════════════════════════════════════════════════════
+// -
 // OpenALSpatialAudioClientImpl
 // Full ISpatialAudioClient + IOpenALSpatialAudioClient COM object
-// ═══════════════════════════════════════════════════════════════
+// -
 class OpenALSpatialAudioClientImpl final : public IOpenALSpatialAudioClient
 {
 public:
     OpenALSpatialAudioClientImpl() = default;
 
-    // ── COM boilerplate ───────────────────────────────────────
+    // - COM boilerplate -
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
     {
         if (!ppv) return E_POINTER;
@@ -91,7 +91,7 @@ public:
         return r;
     }
 
-    // ── ISpatialAudioClient ───────────────────────────────────
+    // - ISpatialAudioClient -
     STDMETHODIMP GetStaticObjectPosition(
         AudioObjectType type, float* x, float* y, float* z) override;
 
@@ -119,7 +119,7 @@ public:
         REFIID riid,
         void** stream) override;
 
-    // ── IOpenALSpatialAudioClient (extensions) ────────────────
+    // - IOpenALSpatialAudioClient (extensions) -
     STDMETHODIMP SetObjectSpatialParams(
         ISpatialAudioObject* obj,
         const ObjectSpatialParams& params) override;
@@ -135,7 +135,7 @@ public:
     ALCdevice*  STDMETHODCALLTYPE GetALCDevice()  override { return device_; }
     ALCcontext* STDMETHODCALLTYPE GetALCContext() override { return ctx_; }
 
-    // ── Internal init ─────────────────────────────────────────
+    // - Internal init -
     HRESULT Init(const HRTFConfig& cfg, const std::wstring& deviceId);
 
 private:
@@ -163,7 +163,7 @@ private:
     UINT32     sampleRate_   = kDefaultSampleRate;
     UINT32     framesPerBuf_ = kDefaultFramesPerBuffer;
 
-    // Strong reference — keeps the stream alive for the lifetime of the client.
+    // Strong reference - keeps the stream alive for the lifetime of the client.
     // A weak_ptr was wrong here: the local shared_ptr in ActivateSpatialAudioStream
     // would drop to refcount 0 before the caller could use the returned pointer.
     std::shared_ptr<SpatialAudioStreamImpl> activeStream_;
@@ -175,22 +175,22 @@ private:
     OpenALSpatialAudioClientImpl& operator=(const OpenALSpatialAudioClientImpl&) = delete;
 };
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Init
-// ─────────────────────────────────────────────────────────────
+// -
 HRESULT OpenALSpatialAudioClientImpl::Init(
     const HRTFConfig& cfg, const std::wstring& deviceId)
 {
     hrtfCfg_ = cfg;
     HR(OpenALDevice(deviceId));
     HR(ConfigureHRTF(cfg));
-    OAL_LOG(L"Client initialised – device=" << deviceId);
+    OAL_LOG(L"Client initialised - device=" << deviceId);
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // OpenAL device + context creation
-// ─────────────────────────────────────────────────────────────
+// -
 HRESULT OpenALSpatialAudioClientImpl::OpenALDevice(const std::wstring& deviceId)
 {
     // Convert device ID to narrow string for ALC
@@ -212,7 +212,7 @@ HRESULT OpenALSpatialAudioClientImpl::OpenALDevice(const std::wstring& deviceId)
     // OpenAL Soft 1.21+ will select the Windows audio endpoint
     device_ = alcOpenDevice(deviceName);
     if (!device_) {
-        OAL_LOG(L"alcOpenDevice failed – falling back to default");
+        OAL_LOG(L"alcOpenDevice failed - falling back to default");
         device_ = alcOpenDevice(nullptr);
         if (!device_) {
             OAL_LOG(L"No OpenAL device available");
@@ -255,13 +255,13 @@ bool OpenALSpatialAudioClientImpl::cfg_wants_hrtf() const
     return hrtfCfg_.mode != HRTFMode::Disabled;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // HRTF configuration
-// ─────────────────────────────────────────────────────────────
+// -
 HRESULT OpenALSpatialAudioClientImpl::ConfigureHRTF(const HRTFConfig& cfg)
 {
     if (cfg.mode == HRTFMode::Disabled) {
-        OAL_LOG(L"HRTF disabled – using panning only");
+        OAL_LOG(L"HRTF disabled - using panning only");
         return S_OK;
     }
 
@@ -316,7 +316,7 @@ HRESULT OpenALSpatialAudioClientImpl::ConfigureHRTF(const HRTFConfig& cfg)
                 0
             };
             if (!alcResetDeviceSOFT(device_, resetAttrs)) {
-                OAL_LOG(L"alcResetDeviceSOFT failed – HRTF may not be active");
+                OAL_LOG(L"alcResetDeviceSOFT failed - HRTF may not be active");
             }
         }
     }
@@ -330,7 +330,7 @@ HRESULT OpenALSpatialAudioClientImpl::ConfigureHRTF(const HRTFConfig& cfg)
             alcGetString(device_, ALC_HRTF_SPECIFIER_SOFT));
     } else {
         OAL_LOG(L"HRTF not active (status=" << hrtfStatus <<
-            L") – check OpenAL Soft config");
+            L") - check OpenAL Soft config");
     }
 
     // Configure Doppler
@@ -341,10 +341,10 @@ HRESULT OpenALSpatialAudioClientImpl::ConfigureHRTF(const HRTFConfig& cfg)
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
-// ISpatialAudioClient – static object positions
+// -
+// ISpatialAudioClient - static object positions
 // Mirrors Windows Sonic's standard speaker bed positions
-// ─────────────────────────────────────────────────────────────
+// -
 STDMETHODIMP OpenALSpatialAudioClientImpl::GetStaticObjectPosition(
     AudioObjectType type, float* x, float* y, float* z)
 {
@@ -406,7 +406,7 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::GetSupportedAudioObjectFormatEnumerat
     // 32-bit float mono and stereo at the device sample rate.
     if (!enumerator) return E_POINTER;
 
-    // ── Inner COM class ─────────────────────────────────────
+    // - Inner COM class -
     class FormatEnum final : public IAudioFormatEnumerator {
     public:
         explicit FormatEnum(UINT32 sr)
@@ -467,7 +467,7 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::IsAudioObjectFormatSupported(
     const WAVEFORMATEX* fmt)
 {
     if (!fmt) return E_POINTER;
-    // Accept mono or stereo float32 at any sample rate ≤ 48 kHz
+    // Accept mono or stereo float32 at any sample rate <= 48 kHz
     bool ok = (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) &&
               (fmt->nChannels == 1 || fmt->nChannels == 2) &&
               (fmt->wBitsPerSample == 32) &&
@@ -491,9 +491,9 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::IsSpatialAudioStreamAvailable(
         ? S_OK : AUDCLNT_E_UNSUPPORTED_FORMAT;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Stream activation – the main entry point applications call
-// ─────────────────────────────────────────────────────────────
+// -
+// Stream activation - the main entry point applications call
+// -
 STDMETHODIMP OpenALSpatialAudioClientImpl::ActivateSpatialAudioStream(
     const PROPVARIANT* activationParams,
     REFIID riid,
@@ -527,9 +527,9 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::ActivateSpatialAudioStream(
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // IOpenALSpatialAudioClient extensions
-// ─────────────────────────────────────────────────────────────
+// -
 STDMETHODIMP OpenALSpatialAudioClientImpl::SetObjectSpatialParams(
     ISpatialAudioObject* obj, const ObjectSpatialParams& params)
 {
@@ -588,9 +588,9 @@ STDMETHODIMP OpenALSpatialAudioClientImpl::SetHRTFDataset(UINT32 index)
     return alcResetDeviceSOFT(device_, attrs) ? S_OK : E_FAIL;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Public factory
-// ─────────────────────────────────────────────────────────────
+// -
 Microsoft::WRL::ComPtr<ISpatialAudioClient> CreateClient(
     const HRTFConfig& cfg,
     const std::wstring& deviceId)
@@ -611,3 +611,178 @@ Microsoft::WRL::ComPtr<ISpatialAudioClient> CreateClient(
 }
 
 } // namespace OpenALSpatial
+
+// =============================================================================
+// COM DLL Server exports
+// =============================================================================
+// These four exports are what Windows uses to treat openal_spatial.dll as a
+// proper COM in-process server.  Without them CoCreateInstance returns
+// REGDB_E_CLASSNOTREG and Windows Audio silently skips the provider.
+//
+// DllGetClassObject  -- called by COM when activating our CLSID
+// DllCanUnloadNow    -- called by COM to free the DLL from memory
+// DllRegisterServer  -- optional: called by regsvr32 as an alternative to
+//                       RegisterProvider.exe
+// DllUnregisterServer-- called by regsvr32 /u
+// =============================================================================
+
+// - Reference-count for DLL lifetime -
+static std::atomic<LONG> g_dllRefCount{ 0 };
+
+// - Class factory -
+// IClassFactory that creates OpenALSpatialAudioClientImpl instances.
+// Windows Audio calls CreateInstance with IID_ISpatialAudioClient.
+class OpenALSpatialClassFactory final : public IClassFactory
+{
+public:
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IClassFactory)) {
+            *ppv = static_cast<IClassFactory*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef()  override { return ++refCount_; }
+    STDMETHODIMP_(ULONG) Release() override
+    {
+        ULONG r = --refCount_;
+        if (r == 0) delete this;
+        return r;
+    }
+
+    // IClassFactory
+    STDMETHODIMP CreateInstance(IUnknown* pOuter,
+                                REFIID    riid,
+                                void**    ppv) override
+    {
+        if (!ppv) return E_POINTER;
+        if (pOuter) return CLASS_E_NOAGGREGATION;
+
+        // Default HRTF config -- the caller can QI for IOpenALSpatialAudioClient
+        // afterwards to customise it, or use OpenALSpatial::CreateClient() directly.
+        OpenALSpatial::HRTFConfig cfg;
+        cfg.mode         = OpenALSpatial::HRTFMode::Default;
+        cfg.enableReverb = false;
+
+        auto* impl = new (std::nothrow) OpenALSpatial::OpenALSpatialAudioClientImpl();
+        if (!impl) return E_OUTOFMEMORY;
+
+        HRESULT hr = impl->Init(cfg, L"");
+        if (FAILED(hr)) { impl->Release(); return hr; }
+
+        hr = impl->QueryInterface(riid, ppv);
+        impl->Release();
+        return hr;
+    }
+
+    STDMETHODIMP LockServer(BOOL lock) override
+    {
+        if (lock) ++g_dllRefCount;
+        else      --g_dllRefCount;
+        return S_OK;
+    }
+
+private:
+    std::atomic<ULONG> refCount_{ 1 };
+};
+
+// - CLSID supported by this DLL -
+// Must match CLSID_OpenALSpatialProvider in RegisterProvider.cpp.
+// {9A3B4C5D-6E7F-8901-ABCD-EF1234567890}
+DEFINE_GUID(CLSID_OpenALSpatialProviderDll,
+    0x9a3b4c5d, 0x6e7f, 0x8901,
+    0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90);
+
+// - DLL entry points -
+
+BOOL APIENTRY DllMain(HMODULE /*hModule*/, DWORD reason, LPVOID /*reserved*/)
+{
+    switch (reason) {
+    case DLL_PROCESS_ATTACH:
+    case DLL_THREAD_ATTACH:
+    case DLL_THREAD_DETACH:
+    case DLL_PROCESS_DETACH:
+        break;
+    }
+    return TRUE;
+}
+
+// Called by COM runtime when an app calls CoCreateInstance with our CLSID.
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
+{
+    if (!ppv) return E_POINTER;
+    if (rclsid != CLSID_OpenALSpatialProviderDll) return CLASS_E_CLASSNOTAVAILABLE;
+
+    auto* factory = new (std::nothrow) OpenALSpatialClassFactory();
+    if (!factory) return E_OUTOFMEMORY;
+
+    HRESULT hr = factory->QueryInterface(riid, ppv);
+    factory->Release();
+    return hr;
+}
+
+// Called by COM to determine whether the DLL can be freed.
+STDAPI DllCanUnloadNow()
+{
+    return (g_dllRefCount.load() == 0) ? S_OK : S_FALSE;
+}
+
+// Called by regsvr32 (optional alternative to RegisterProvider.exe).
+// Writes only the COM InProcServer32 entry; RegisterProvider.exe still
+// needed for the MMDevices key which requires the LocalSystem service.
+STDAPI DllRegisterServer()
+{
+    wchar_t path[MAX_PATH] = {};
+    if (!GetModuleFileNameW(
+            GetModuleHandleW(nullptr), path, MAX_PATH))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    // Attempt to retrieve this DLL's own path
+    HMODULE hSelf = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&DllRegisterServer), &hSelf);
+    if (hSelf) GetModuleFileNameW(hSelf, path, MAX_PATH);
+
+    wchar_t clsidStr[64] = {};
+    StringFromGUID2(CLSID_OpenALSpatialProviderDll, clsidStr, 64);
+
+    std::wstring keyBase = std::wstring(L"SOFTWARE\\Classes\\CLSID\\")
+                         + clsidStr;
+    std::wstring keyIP   = keyBase + L"\\InProcServer32";
+
+    HKEY hk = nullptr;
+    LONG r = RegCreateKeyExW(HKEY_LOCAL_MACHINE, keyBase.c_str(),
+                 0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr);
+    if (r != ERROR_SUCCESS) return HRESULT_FROM_WIN32((DWORD)r);
+    const wchar_t* name = L"OpenAL Soft Spatial Audio Renderer";
+    RegSetValueExW(hk, nullptr, 0, REG_SZ,
+        (const BYTE*)name, (DWORD)((wcslen(name)+1)*sizeof(wchar_t)));
+    RegCloseKey(hk);
+
+    r = RegCreateKeyExW(HKEY_LOCAL_MACHINE, keyIP.c_str(),
+            0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr);
+    if (r != ERROR_SUCCESS) return HRESULT_FROM_WIN32((DWORD)r);
+    RegSetValueExW(hk, nullptr, 0, REG_SZ,
+        (const BYTE*)path, (DWORD)((wcslen(path)+1)*sizeof(wchar_t)));
+    const wchar_t* model = L"Both";
+    RegSetValueExW(hk, L"ThreadingModel", 0, REG_SZ,
+        (const BYTE*)model, (DWORD)((wcslen(model)+1)*sizeof(wchar_t)));
+    RegCloseKey(hk);
+    return S_OK;
+}
+
+STDAPI DllUnregisterServer()
+{
+    wchar_t clsidStr[64] = {};
+    StringFromGUID2(CLSID_OpenALSpatialProviderDll, clsidStr, 64);
+    std::wstring key = std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + clsidStr;
+    RegDeleteTreeW(HKEY_LOCAL_MACHINE, key.c_str());
+    return S_OK;
+}

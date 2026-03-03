@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 project(OpenALSpatialAudio VERSION 1.0.0 LANGUAGES CXX)
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Compiler requirements
-# ──────────────────────────────────────────────────────────────
+# -
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -11,19 +11,19 @@ if (NOT WIN32)
     message(FATAL_ERROR "This project targets Windows only (WASAPI/ISpatialAudioClient).")
 endif()
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Options
-# ──────────────────────────────────────────────────────────────
+# -
 option(OPENAL_SPATIAL_BUILD_EXAMPLES  "Build the example applications" ON)
 option(OPENAL_SPATIAL_BUILD_REGISTER  "Build the provider registration tool" ON)
 option(OPENAL_SPATIAL_BUILD_SHARED    "Build as a shared DLL (for COM server)" ON)
 
-# ──────────────────────────────────────────────────────────────
+# -
 # OpenAL Soft location
 # Accepts OPENAL_INCLUDE_DIR and OPENAL_LIBRARY from CMake
 # command line, or falls back to vcpkg/environment defaults.
-# ──────────────────────────────────────────────────────────────
-# ── OpenAL Soft ────────────────────────────────────────────────────────────
+# -
+# - OpenAL Soft -
 # Priority order:
 #   1. OPENAL_ROOT cmake/env variable  (CI sets this to the pre-built SDK dir)
 #   2. CONFIG-mode find_package        (vcpkg or system install)
@@ -90,9 +90,9 @@ if (NOT TARGET OpenAL::OpenAL)
     endif()
 endif()
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Windows SDK / WASAPI
-# ──────────────────────────────────────────────────────────────
+# -
 set(WINDOWS_SDK_AUDIO_LIBS
     ole32
     avrt
@@ -101,9 +101,9 @@ set(WINDOWS_SDK_AUDIO_LIBS
     mmdevapi
 )
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Core library sources
-# ──────────────────────────────────────────────────────────────
+# -
 set(OPENAL_SPATIAL_SOURCES
     src/OpenALSpatialAudioClient.cpp
     src/SpatialAudioObject.cpp
@@ -121,14 +121,17 @@ set(OPENAL_SPATIAL_PRIVATE_HEADERS
     src/SpatialAudioStream.h
 )
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Main library target
-# ──────────────────────────────────────────────────────────────
+# -
 if (OPENAL_SPATIAL_BUILD_SHARED)
     add_library(openal_spatial SHARED
         ${OPENAL_SPATIAL_SOURCES}
         ${OPENAL_SPATIAL_PUBLIC_HEADERS}
         ${OPENAL_SPATIAL_PRIVATE_HEADERS}
+        # .def file guarantees DllGetClassObject etc. are exported by their
+        # exact undecorated names -- required for COM in-process servers.
+        src/openal_spatial.def
     )
     target_compile_definitions(openal_spatial PRIVATE
         OPENAL_SPATIAL_EXPORTS
@@ -136,7 +139,9 @@ if (OPENAL_SPATIAL_BUILD_SHARED)
     )
     set_target_properties(openal_spatial PROPERTIES
         OUTPUT_NAME "openal_spatial"
-        WINDOWS_EXPORT_ALL_SYMBOLS ON
+        # Do NOT use WINDOWS_EXPORT_ALL_SYMBOLS together with a .def file --
+        # the .def file is the authoritative export list.
+        WINDOWS_EXPORT_ALL_SYMBOLS OFF
     )
 else()
     add_library(openal_spatial STATIC
@@ -161,6 +166,8 @@ target_link_libraries(openal_spatial
         OpenAL::OpenAL
     PRIVATE
         ${WINDOWS_SDK_AUDIO_LIBS}
+        advapi32   # RegCreateKeyExW etc. in DllRegisterServer
+        shlwapi    # PathFileExistsW
 )
 
 target_compile_options(openal_spatial PRIVATE
@@ -177,9 +184,9 @@ target_compile_definitions(openal_spatial PRIVATE
     _WIN32_WINNT=0x0A00  # Windows 10
 )
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Registration tool
-# ──────────────────────────────────────────────────────────────
+# -
 if (OPENAL_SPATIAL_BUILD_REGISTER)
     add_executable(RegisterProvider
         tools/RegisterProvider.cpp
@@ -195,9 +202,9 @@ if (OPENAL_SPATIAL_BUILD_REGISTER)
     )
 endif()
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Examples
-# ──────────────────────────────────────────────────────────────
+# -
 if (OPENAL_SPATIAL_BUILD_EXAMPLES)
     add_executable(BasicExample
         examples/BasicExample.cpp
@@ -219,9 +226,9 @@ if (OPENAL_SPATIAL_BUILD_EXAMPLES)
     )
 endif()
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Install rules
-# ──────────────────────────────────────────────────────────────
+# -
 install(TARGETS openal_spatial
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
@@ -234,13 +241,13 @@ if (OPENAL_SPATIAL_BUILD_REGISTER)
     install(TARGETS RegisterProvider RUNTIME DESTINATION bin)
 endif()
 
-# ──────────────────────────────────────────────────────────────
+# -
 # Summary
-# ──────────────────────────────────────────────────────────────
-message(STATUS "────────────────────────────────────────")
+# -
+message(STATUS "-")
 message(STATUS "  OpenAL Spatial Audio Renderer")
 message(STATUS "  Build type:   ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Shared DLL:   ${OPENAL_SPATIAL_BUILD_SHARED}")
 message(STATUS "  Examples:     ${OPENAL_SPATIAL_BUILD_EXAMPLES}")
 message(STATUS "  Register:     ${OPENAL_SPATIAL_BUILD_REGISTER}")
-message(STATUS "────────────────────────────────────────")
+message(STATUS "-")

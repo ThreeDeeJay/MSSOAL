@@ -500,6 +500,9 @@ static void ListProviders()
     RegCloseKey(hk);
 }
 
+// ---------------------------------------------------------------------------
+// diagnose: registry access, DLL load, CoCreateInstance
+// ---------------------------------------------------------------------------
 static void Diagnose()
 {
     wprintf(L"  Elevation : %s\n\n",
@@ -526,7 +529,7 @@ static void Diagnose()
     }
 
     // ---- COM registration ----
-    wprintf(L"\n  COM InProcServer32 registered:\n");
+    wprintf(L"\n  COM InProcServer32:\n");
     wchar_t clsidStr[64] = {};
     StringFromGUID2(CLSID_OpenALSpatialProvider, clsidStr, 64);
     std::wstring inprocPath = std::wstring(kCOMBase) + L"\\" + clsidStr
@@ -537,24 +540,21 @@ static void Diagnose()
         wprintf(L"  [MISSING] Run 'register' first.\n");
     } else {
         wprintf(L"  DLL path : %s\n", dllPath.c_str());
-        // Check the DLL file itself exists
         bool fileOk = (GetFileAttributesW(dllPath.c_str()) !=
                        INVALID_FILE_ATTRIBUTES);
         wprintf(L"  DLL file : %s\n",
-                fileOk ? L"found" : L"NOT FOUND -- path in registry is wrong");
+                fileOk ? L"found" : L"NOT FOUND -- path in registry is stale");
     }
 
     // ---- DLL load test ----
-    // audiosrv loads the DLL in a restricted environment. Test here whether
-    // all dependencies resolve -- this is the most common silent failure.
-    wprintf(L"\n  DLL load test (simulates what audiosrv does):\n");
+    wprintf(L"\n  DLL load + export test:\n");
+    bool dllLoaded = false;
     if (!dllPath.empty()) {
-        // LOAD_LIBRARY_AS_DATAFILE would not resolve imports; we want a full load.
         HMODULE hm = LoadLibraryExW(dllPath.c_str(), nullptr,
                                     LOAD_WITH_ALTERED_SEARCH_PATH);
         if (hm) {
+            dllLoaded = true;
             wprintf(L"  [OK]  LoadLibraryEx succeeded.\n");
-            // Verify the required exports are present
             const char* exports[] = {
                 "DllGetClassObject", "DllCanUnloadNow",
                 "DllRegisterServer", "DllUnregisterServer"
@@ -567,26 +567,25 @@ static void Diagnose()
             FreeLibrary(hm);
         } else {
             DWORD err = GetLastError();
-            wprintf(L"  [FAIL] LoadLibraryEx error %lu (%s)\n",
+            wprintf(L"  [FAIL] LoadLibraryEx: error %lu (%s)\n",
                     err, Win32Msg(err).c_str());
-            // Error 126 = "The specified module could not be found"
-            // This means a DEPENDENCY DLL is missing, not the DLL itself.
             if (err == ERROR_MOD_NOT_FOUND) {
-                wprintf(L"\n  >>> Most likely cause: OpenAL32.dll (or soft_oal.dll)\n"
-                        L"  >>> is not in a directory that audiosrv can search.\n"
-                        L"  >>> Fix: copy OpenAL32.dll to the same folder as\n"
-                        L"  >>>   openal_spatial.dll, OR copy it to:\n"
-                        L"  >>>   C:\\Windows\\System32\\OpenAL32.dll\n"
-                        L"  >>> Then re-run: net stop audiosrv && net start audiosrv\n");
+                wprintf(L"\n"
+                    L"  CAUSE: A dependency DLL is missing (most likely OpenAL32.dll).\n"
+                    L"  The Windows Audio service (audiosrv) has a restricted DLL search\n"
+                    L"  path and cannot find OpenAL32.dll next to openal_spatial.dll.\n\n"
+                    L"  FIX (choose one):\n"
+                    L"    A) Copy OpenAL32.dll to C:\\Windows\\System32\\\n"
+                    L"    B) Copy OpenAL32.dll to the same folder as openal_spatial.dll\n"
+                    L"       AND ensure that folder is in the system PATH (not user PATH).\n\n"
+                    L"  After fixing, re-run:\n"
+                    L"    net stop audiosrv && net start audiosrv\n");
             }
         }
     }
 
     // ---- CoCreateInstance test ----
-    // If the DLL loaded above but CoCreateInstance still fails, the class
-    // factory has a bug.  If it succeeds here but not in audiosrv, the issue
-    // is the service's restricted token or missing dependency in Session 0.
-    wprintf(L"\n  CoCreateInstance test (ISpatialAudioClient):\n");
+    wprintf(L"\n  CoCreateInstance test (what audiosrv does at provider discovery):\n");
     if (!dllPath.empty()) {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         IUnknown* punk = nullptr;
@@ -594,21 +593,75 @@ static void Diagnose()
                                       nullptr, CLSCTX_INPROC_SERVER,
                                       __uuidof(IUnknown), (void**)&punk);
         if (SUCCEEDED(hr) && punk) {
-            wprintf(L"  [OK]  CoCreateInstance succeeded -- COM activation works.\n");
+            wprintf(L"  [OK]  CoCreateInstance succeeded.\n"
+                    L"\n"
+                    L"  COM activation works from an interactive process.\n"
+                    L"  If the provider still does not appear in Sound settings,\n"
+                    L"  the registry path we write to is not what Windows reads.\n"
+                    L"  Run: RegisterProvider.exe procmon\n"
+                    L"  to get exact Process Monitor instructions to find the real path.\n");
             punk->Release();
         } else {
             wprintf(L"  [FAIL] hr=0x%08X  ", (unsigned)hr);
             if (hr == REGDB_E_CLASSNOTREG)
-                wprintf(L"CLSID not registered -- run 'register' first.\n");
-            else if (hr == (HRESULT)0x8007007E || hr == (HRESULT)0x80070002)
-                wprintf(L"DLL or dependency not found (error 126/2).\n"
-                        L"  Copy OpenAL32.dll to System32 or beside openal_spatial.dll.\n");
+                wprintf(L"CLSID not registered. Run 'register' first.\n");
+            else if ((DWORD)hr == 0x8007007E || (DWORD)hr == 0x80070002)
+                wprintf(L"DLL or a dependency not found (see DLL load test above).\n");
             else
                 wprintf(L"%s\n", Win32Msg((DWORD)hr).c_str());
+
+            if (!dllLoaded)
+                wprintf(L"  (CoCreateInstance skipped -- DLL did not load)\n");
         }
         CoUninitialize();
     }
+
+    wprintf(L"\n  NEXT STEP SUMMARY\n"
+            L"  -----------------\n"
+            L"  LoadLibraryEx FAIL  -> Copy OpenAL32.dll to System32, restart audiosrv.\n"
+            L"  CoCreateInstance OK -> Registry path wrong. Run: RegisterProvider.exe procmon\n"
+            L"  CoCreateInstance FAIL (DLL loaded) -> Bug in DllGetClassObject.\n");
 }
+
+// ---------------------------------------------------------------------------
+// procmon: print exact Process Monitor instructions for finding the real path
+// ---------------------------------------------------------------------------
+static void PrintProcMonInstructions()
+{
+    wprintf(
+        L"  HOW TO FIND THE REAL SPATIAL AUDIO REGISTRY PATH\n"
+        L"  ==================================================\n\n"
+        L"  Windows does not document where it reads spatial sound providers from.\n"
+        L"  Process Monitor will show us exactly which registry keys it reads\n"
+        L"  when the Sound settings dropdown is opened.\n\n"
+        L"  STEPS:\n\n"
+        L"  1. Download Process Monitor (procmon.exe) from:\n"
+        L"       https://learn.microsoft.com/sysinternals/downloads/procmon\n\n"
+        L"  2. Run procmon.exe as Administrator.\n\n"
+        L"  3. In the Filter menu -> Filter (Ctrl+L), add these filters:\n"
+        L"       Process Name  is  SystemSettings.exe  -> Include\n"
+        L"       Operation     is  RegOpenKey          -> Include\n"
+        L"       Operation     is  RegQueryValue       -> Include\n"
+        L"       Operation     is  RegEnumKey          -> Include\n"
+        L"       Path          contains  Spatial       -> Include\n"
+        L"       Path          contains  MMDevice      -> Include\n"
+        L"     Click Add after each, then OK.\n\n"
+        L"  4. Clear the event list (Ctrl+X).\n\n"
+        L"  5. Open Settings -> System -> Sound -> [your headphones]\n"
+        L"     -> Spatial audio  (open the dropdown)\n\n"
+        L"  6. Stop capture (Ctrl+E).\n\n"
+        L"  7. Look for RegEnumKey or RegOpenKey calls that enumerate a key\n"
+        L"     whose subkeys include known CLSIDs like:\n"
+        L"       {B2B88BE7-07A8-4BC7-B25B-6A68B9B0EE93}  (Windows Sonic)\n"
+        L"     The parent path of that CLSID is the real provider list key.\n\n"
+        L"  8. Share the captured path and we can update RegisterProvider.exe\n"
+        L"     to write to the correct location.\n\n"
+        L"  ALTERNATIVE: check if a Dolby Atmos trial is available in the\n"
+        L"  Microsoft Store. Installing it and then examining what registry\n"
+        L"  keys it creates (with procmon during install, or regshot before/after)\n"
+        L"  will reveal the exact format Windows requires.\n");
+}
+
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -640,17 +693,19 @@ int wmain(int argc, wchar_t* argv[])
                 L"  RegisterProvider.exe  register   [path\\to\\openal_spatial.dll]\n"
                 L"  RegisterProvider.exe  unregister\n"
                 L"  RegisterProvider.exe  list\n"
-                L"  RegisterProvider.exe  diagnose\n\n"
-                L"Registers the provider in the MMDevices\\SpatialAudioEndpoint subtree\n"
-                L"so it appears in the Sound control panel spatial sound dropdown.\n"
-                L"Run as Administrator (a one-shot LocalSystem service handles the\n"
-                L"SYSTEM-ACL-protected MMDevices key automatically).\n");
+                L"  RegisterProvider.exe  diagnose\n"
+                L"  RegisterProvider.exe  procmon\n\n"
+                L"'diagnose' checks COM activation and DLL loading.\n"
+                L"'procmon'  prints instructions for finding the real registry path\n"
+                L"           Windows uses for the spatial sound dropdown.\n"
+                L"Run as Administrator.\n");
         return 1;
     }
 
     std::wstring cmd = argv[1];
 
     if (cmd == L"diagnose") { Diagnose(); return 0; }
+    if (cmd == L"procmon")  { PrintProcMonInstructions(); return 0; }
     if (cmd == L"list")     { ListProviders(); return 0; }
 
     if (cmd == L"unregister") {

@@ -165,18 +165,78 @@ static bool UnregisterCOMServer(const GUID& clsid)
 // The actual MMDevices write -- called from within the LocalSystem service.
 // These functions run with SYSTEM privileges.
 // ---------------------------------------------------------------------------
-static bool WriteMMDevicesKey(const std::wstring& dll, const GUID& clsid)
+// Enable a named privilege in the current token.
+// Required before using REG_OPTION_BACKUP_RESTORE.
+static DWORD EnablePrivilege(const wchar_t* name)
 {
+    HANDLE tok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok))
+        return GetLastError();
+
+    LUID luid{};
+    if (!LookupPrivilegeValueW(nullptr, name, &luid)) {
+        DWORD err = GetLastError(); CloseHandle(tok); return err;
+    }
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount           = 1;
+    tp.Privileges[0].Luid       = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    AdjustTokenPrivileges(tok, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+    DWORD err = GetLastError();  // ERROR_SUCCESS or ERROR_NOT_ALL_ASSIGNED
+    CloseHandle(tok);
+    return err;
+}
+
+// Write the SpatialAudioEndpoint subkey for our CLSID.
+// Returns the Win32 error code directly (ERROR_SUCCESS on success) so
+// SvcMain can pass the real value as the service exit code instead of
+// the opaque ERROR_FUNCTION_FAILED (1627).
+//
+// Key technique: REG_OPTION_BACKUP_RESTORE with SeRestorePrivilege
+// ----------------------------------------------------------------
+// Even LocalSystem cannot create subkeys under MMDevices using normal
+// KEY_WRITE access because the key is owned by TrustedInstaller with a
+// DENY ACE for everyone else.  REG_OPTION_BACKUP_RESTORE bypasses the
+// DACL entirely when SE_BACKUP_NAME / SE_RESTORE_NAME are active --
+// this is exactly how regedit.exe "Take Ownership" works internally.
+static DWORD WriteMMDevicesKey(const std::wstring& dll, const GUID& clsid)
+{
+    // Enable the privileges required for REG_OPTION_BACKUP_RESTORE.
+    // Ignore return values -- if we lack them the RegCreateKeyEx below will
+    // fail with a meaningful error code that propagates to the caller.
+    EnablePrivilege(SE_BACKUP_NAME);    // L"SeBackupPrivilege"
+    EnablePrivilege(SE_RESTORE_NAME);   // L"SeRestorePrivilege"
+
     std::wstring cs  = GuidToString(clsid);
     std::wstring key = std::wstring(kMMDevicesPath) + L"\\" + cs;
 
     HKEY hk = nullptr;
-    LONG r = RegCreateKeyExW(HKEY_LOCAL_MACHINE, key.c_str(),
-                 0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr);
+    // REG_OPTION_BACKUP_RESTORE: ignores samDesired, uses privilege-based
+    // access instead of DACL-based access.  With SeRestorePrivilege active
+    // this grants KEY_ALL_ACCESS regardless of the key's security descriptor.
+    LONG r = RegCreateKeyExW(
+        HKEY_LOCAL_MACHINE, key.c_str(),
+        0, nullptr,
+        REG_OPTION_NON_VOLATILE | REG_OPTION_BACKUP_RESTORE,
+        KEY_WRITE,       // ignored when BACKUP_RESTORE is set, but required
+        nullptr, &hk, nullptr);
+
     if (r != ERROR_SUCCESS) {
-        wprintf(L"  [FAIL] MMDevices key: error %lu %s\n", (DWORD)r,
-                Win32Msg((DWORD)r).c_str());
-        return false;
+        // Log to Application event log with the real error code so it shows
+        // up in Event Viewer even if the console output is not visible.
+        HANDLE hEvt = RegisterEventSourceW(nullptr, L"Application");
+        if (hEvt) {
+            wchar_t msg[512];
+            swprintf_s(msg,
+                L"OALSpatialReg WriteMMDevicesKey: RegCreateKeyExW(\"%s\") "
+                L"failed with error %lu", key.c_str(), (DWORD)r);
+            const wchar_t* msgs[] = { msg };
+            ReportEventW(hEvt, EVENTLOG_ERROR_TYPE, 0, 0,
+                         nullptr, 1, 0, msgs, nullptr);
+            DeregisterEventSource(hEvt);
+        }
+        return (DWORD)r;
     }
 
     const wchar_t* disp = L"OpenAL Soft 3D Audio (HRTF)";
@@ -201,15 +261,22 @@ static bool WriteMMDevicesKey(const std::wstring& dll, const GUID& clsid)
         (const BYTE*)&flags, sizeof(DWORD));
 
     RegCloseKey(hk);
-    return true;
+
+    // Log success too so it's visible in Event Viewer
+    HANDLE hEvt = RegisterEventSourceW(nullptr, L"Application");
+    if (hEvt) {
+        wchar_t msg[512];
+        swprintf_s(msg, L"OALSpatialReg: successfully wrote HKLM\\%s",
+                   key.c_str());
+        const wchar_t* msgs[] = { msg };
+        ReportEventW(hEvt, EVENTLOG_INFORMATION_TYPE, 0, 0,
+                     nullptr, 1, 0, msgs, nullptr);
+        DeregisterEventSource(hEvt);
+    }
+    return ERROR_SUCCESS;
 }
 
-static bool DeleteMMDevicesKey(const GUID& clsid)
-{
-    std::wstring key = std::wstring(kMMDevicesPath) + L"\\" + GuidToString(clsid);
-    LONG r = RegDeleteTreeW(HKEY_LOCAL_MACHINE, key.c_str());
-    return (r == ERROR_SUCCESS || r == ERROR_FILE_NOT_FOUND);
-}
+// (DeleteMMDevicesKey is handled inline in SvcMain with privilege elevation)
 
 // ---------------------------------------------------------------------------
 // One-shot service implementation
@@ -285,9 +352,15 @@ static VOID WINAPI SvcMain(DWORD, LPWSTR*)
 
     DWORD rc = NO_ERROR;
     if (wcscmp(p->verb, L"write") == 0) {
-        if (!WriteMMDevicesKey(p->dll, p->clsid)) rc = ERROR_FUNCTION_FAILED;
+        rc = WriteMMDevicesKey(p->dll, p->clsid);  // real Win32 error code
     } else if (wcscmp(p->verb, L"delete") == 0) {
-        if (!DeleteMMDevicesKey(p->clsid)) rc = ERROR_FUNCTION_FAILED;
+        EnablePrivilege(SE_BACKUP_NAME);
+        EnablePrivilege(SE_RESTORE_NAME);
+        std::wstring key = std::wstring(kMMDevicesPath) + L"\\" +
+                           GuidToString(p->clsid);
+        LONG r = RegDeleteTreeW(HKEY_LOCAL_MACHINE, key.c_str());
+        rc = (r == ERROR_SUCCESS || r == ERROR_FILE_NOT_FOUND)
+             ? ERROR_SUCCESS : (DWORD)r;
     } else {
         rc = ERROR_INVALID_PARAMETER;
     }
@@ -377,9 +450,9 @@ static bool RunAsService(const wchar_t* verb,
         ok = (ss.dwCurrentState == SERVICE_STOPPED &&
               ss.dwWin32ExitCode == NO_ERROR);
         if (!ok) {
-            wprintf(L"  [FAIL] Service stopped with state=%lu exitCode=%lu (%s)\n"
+            wprintf(L"  [FAIL] Service stopped: state=%lu exitCode=%lu (%s)\n"
                     L"         Check Event Viewer -> Windows Logs -> Application\n"
-                    L"         for 'OALSpatialReg' entries with more detail.\n",
+                    L"         filter Source = 'Application', look for OALSpatialReg.\n",
                     ss.dwCurrentState, ss.dwWin32ExitCode,
                     Win32Msg(ss.dwWin32ExitCode).c_str());
         }

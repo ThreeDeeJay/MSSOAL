@@ -30,39 +30,39 @@
 
 namespace OpenALSpatial {
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Internal PCM frame buffer passed between render-thread and
 // AL upload thread via a wait-free single-producer ring.
-// ─────────────────────────────────────────────────────────────
+// -
 struct AudioFrame {
     std::vector<float> samples;   // Interleaved, normalised float32
     UINT32 frameCount = 0;
     double timestampQPC = 0.0;
-    bool   isStatic = false;      // true → don't expect more frames
+    bool   isStatic = false;      // true ? don't expect more frames
 };
 
-// ─────────────────────────────────────────────────────────────
+// -
 // COM implementation
-// ─────────────────────────────────────────────────────────────
+// -
 class SpatialAudioObjectImpl final : public ISpatialAudioObject
 {
 public:
-    // ── COM boilerplate ──────────────────────────────────────
+    // - COM boilerplate -
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
     STDMETHODIMP_(ULONG) AddRef()  override { return ++refCount_; }
     STDMETHODIMP_(ULONG) Release() override;
 
-    // ── ISpatialAudioObjectBase ───────────────────────────────
+    // - ISpatialAudioObjectBase -
     STDMETHODIMP GetBuffer(BYTE** buffer, UINT32* bufferLength) override;
     STDMETHODIMP SetEndOfStream(UINT32 frameCount) override;
     STDMETHODIMP IsActive(BOOL* isActive) override;
     STDMETHODIMP GetAudioObjectType(AudioObjectType* type) override;
 
-    // ── ISpatialAudioObject ───────────────────────────────────
+    // - ISpatialAudioObject -
     STDMETHODIMP SetPosition(float x, float y, float z) override;
     STDMETHODIMP SetVolume(float volume) override;
 
-    // ── Internal (called by stream) ───────────────────────────
+    // - Internal (called by stream) -
     static std::shared_ptr<SpatialAudioObjectImpl> Create(
         AudioObjectType type,
         UINT32 sampleRate,
@@ -82,7 +82,7 @@ public:
     float Y() const { return pos_[1]; }
     float Z() const { return pos_[2]; }
 
-    // ── Passkey for make_shared ───────────────────────────────
+    // - Passkey for make_shared -
     // Allows std::make_shared<SpatialAudioObjectImpl> to work while
     // still preventing accidental construction from outside this class.
     struct PrivateToken {};
@@ -112,11 +112,20 @@ private:
     std::array<ALuint, kNumStreamingBuffers> alBuffers_{};
     bool   alReady_   = false;
 
-    // Staging buffer (written by app, read by upload thread)
-    std::vector<float>  stagingF32_;      // float staging area
-    std::vector<uint8_t> stagingPCM_;     // byte view for GetBuffer
+    // Staging buffer -- the ONE write target for the app.
+    // GetBuffer() returns a BYTE* into this buffer.
+    // UploadPendingBuffers() reads directly from this buffer.
+    // stagingF32_ is gone: there is no second copy.
+    std::vector<uint8_t> stagingPCM_;     // raw float32 samples as bytes
     UINT32 stagingFrameCount_ = 0;
     bool   endOfStream_ = false;
+    bool   stagingDirty_ = false;         // true after each GetBuffer call
+
+    // Free-list of AL buffer IDs that are NOT currently queued on the source.
+    // Initialised to all kNumStreamingBuffers IDs.
+    // Unqueued (processed) buffers are returned here before reuse.
+    // This replaces the blind modulo ring index that caused AL_INVALID_OPERATION.
+    std::vector<ALuint> freeBuffers_;
 
     // Thread safety
     mutable std::mutex bufMutex_;

@@ -42,9 +42,9 @@
 
 namespace OpenALSpatial {
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Factory
-// ─────────────────────────────────────────────────────────────
+// -
 std::shared_ptr<SpatialAudioObjectImpl> SpatialAudioObjectImpl::Create(
     AudioObjectType type,
     UINT32 sampleRate,
@@ -71,18 +71,19 @@ std::shared_ptr<SpatialAudioObjectImpl> SpatialAudioObjectImpl::Create(
             : AL_FORMAT_STEREO16;
     }
 
-    // Size staging buffer (float32 samples)
-    obj->stagingF32_.resize((size_t)framesPerBuffer * numChannels, 0.f);
-    obj->stagingPCM_.resize(obj->stagingF32_.size() * sizeof(float), 0);
+    // Single staging buffer sized for one full frame of float32 samples.
+    // The app writes into it via GetBuffer(); we upload from it in UploadPendingBuffers().
+    obj->stagingPCM_.assign(
+        (size_t)framesPerBuffer * numChannels * sizeof(float), 0u);
 
-    obj->InitALSource();
+    obj->InitALSource();   // also populates freeBuffers_
     obj->active_.store(true, std::memory_order_release);
     return obj;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // AL resource init
-// ─────────────────────────────────────────────────────────────
+// -
 void SpatialAudioObjectImpl::InitALSource()
 {
     alGetError(); // clear
@@ -102,7 +103,7 @@ void SpatialAudioObjectImpl::InitALSource()
         return;
     }
 
-    // ── Force per-object HRTF spatialization ─────────────────
+    // - Force per-object HRTF spatialization -
     // AL_SOURCE_SPATIALIZE_SOFT ensures HRTF is applied to this
     // source even if the source is stereo (downmixed to mono first
     // and then HRTF-processed).
@@ -130,7 +131,7 @@ void SpatialAudioObjectImpl::InitALSource()
     // Stereo sources: use AL_SOFT_stereo_angles for width control
     if (numChannels_ == 2 &&
         alIsExtensionPresent("AL_SOFT_stereo_angles")) {
-        // Default ±30° spread
+        // Default ?30? spread
         ALfloat angles[2] = {
              static_cast<ALfloat>( 30.0 * M_PI / 180.0),
              static_cast<ALfloat>(-30.0 * M_PI / 180.0)
@@ -139,13 +140,17 @@ void SpatialAudioObjectImpl::InitALSource()
     }
 
     alReady_ = (alGetError() == AL_NO_ERROR);
+    if (alReady_) {
+        // All buffers start unqueued -- add them all to the free-list.
+        freeBuffers_.assign(alBuffers_.begin(), alBuffers_.end());
+    }
     OAL_LOG(L"AL source " << alSource_ << L" ready="
         << alReady_ << L" type=" << (int)type_);
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Destructor
-// ─────────────────────────────────────────────────────────────
+// -
 SpatialAudioObjectImpl::~SpatialAudioObjectImpl()
 {
     DestroyALResources();
@@ -168,10 +173,10 @@ void SpatialAudioObjectImpl::DestroyALResources()
     alReady_ = false;
 }
 
-// ─────────────────────────────────────────────────────────────
-// ISpatialAudioObjectBase – GetBuffer
+// -
+// ISpatialAudioObjectBase - GetBuffer
 // Called by app to get a write pointer for this update cycle
-// ─────────────────────────────────────────────────────────────
+// -
 STDMETHODIMP SpatialAudioObjectImpl::GetBuffer(
     BYTE** buffer, UINT32* bufferLength)
 {
@@ -181,25 +186,25 @@ STDMETHODIMP SpatialAudioObjectImpl::GetBuffer(
     std::lock_guard<std::mutex> lk(bufMutex_);
     endOfStream_ = false;
 
-    // Zero out so apps that don't write all frames get silence
-    std::memset(stagingF32_.data(), 0,
-        stagingF32_.size() * sizeof(float));
+    // Zero out so apps that only partially fill a frame get silence in the gap
+    std::memset(stagingPCM_.data(), 0, stagingPCM_.size());
+    stagingDirty_ = true;
 
     *buffer       = stagingPCM_.data();
-    *bufferLength = static_cast<UINT32>(stagingF32_.size() * sizeof(float));
+    *bufferLength = static_cast<UINT32>(stagingPCM_.size());
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
-// ISpatialAudioObjectBase – SetEndOfStream
-// ─────────────────────────────────────────────────────────────
+// -
+// ISpatialAudioObjectBase - SetEndOfStream
+// -
 STDMETHODIMP SpatialAudioObjectImpl::SetEndOfStream(UINT32 frameCount)
 {
     std::lock_guard<std::mutex> lk(bufMutex_);
     stagingFrameCount_ = frameCount;
     endOfStream_       = true;
     active_.store(false, std::memory_order_release);
-    OAL_LOG(L"SetEndOfStream – src=" << alSource_);
+    OAL_LOG(L"SetEndOfStream - src=" << alSource_);
     return S_OK;
 }
 
@@ -217,11 +222,11 @@ STDMETHODIMP SpatialAudioObjectImpl::GetAudioObjectType(AudioObjectType* type)
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
-// ISpatialAudioObject – SetPosition
+// -
+// ISpatialAudioObject - SetPosition
 // Converts from MS API coordinate system (metres, right-handed,
 // Y-up) directly to OpenAL (same convention).
-// ─────────────────────────────────────────────────────────────
+// -
 STDMETHODIMP SpatialAudioObjectImpl::SetPosition(float x, float y, float z)
 {
     pos_[0] = x; pos_[1] = y; pos_[2] = z;
@@ -240,9 +245,9 @@ STDMETHODIMP SpatialAudioObjectImpl::SetVolume(float volume)
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // Extended spatial parameters
-// ─────────────────────────────────────────────────────────────
+// -
 void SpatialAudioObjectImpl::ApplySpatialParams(const ObjectSpatialParams& p)
 {
     if (!alSource_) return;
@@ -289,72 +294,96 @@ void SpatialAudioObjectImpl::ApplySpatialParams(const ObjectSpatialParams& p)
     volume_ = p.gain;
 }
 
-// ─────────────────────────────────────────────────────────────
-// UploadPendingBuffers – called from AL thread
-// Drains processed buffers from the source queue, then refills
-// with the latest PCM frame from the staging area.
-// ─────────────────────────────────────────────────────────────
+// -
+// UploadPendingBuffers -- called from AL thread once per render cycle.
+//
+// Correct streaming buffer protocol:
+//   1. Ask OpenAL how many buffers it has finished playing (AL_BUFFERS_PROCESSED).
+//   2. Unqueue those finished buffers -- they are now safe to refill.
+//   3. Put each unqueued buffer ID onto our freeBuffers_ list.
+//   4. If freeBuffers_ is empty we have no slot to write into -- skip (source
+//      is still consuming last frame; the app is calling too fast).
+//   5. Take one free buffer ID, call alBufferData() on it, then queue it.
+//
+// The old code used a blind modulo ring index and called alBufferData() on
+// buffers that might still be queued, causing AL_INVALID_OPERATION 0xa004
+// ("Modifying storage for in-use buffer").
+// -
 void SpatialAudioObjectImpl::UploadPendingBuffers()
 {
     if (!alReady_ || !alSource_) return;
 
-    // ── Drain processed buffers ──────────────────────────────
-    ALint processed = 0;
-    alGetSourcei(alSource_, AL_BUFFERS_PROCESSED, &processed);
-    while (processed-- > 0) {
-        ALuint buf = 0;
-        alSourceUnqueueBuffers(alSource_, 1, &buf);
+    // - Step 1 & 3: reclaim all buffers OpenAL has finished with -
+    {
+        ALint processed = 0;
+        alGetSourcei(alSource_, AL_BUFFERS_PROCESSED, &processed);
+        while (processed-- > 0) {
+            ALuint buf = 0;
+            alSourceUnqueueBuffers(alSource_, 1, &buf);
+            if (buf) freeBuffers_.push_back(buf);
+        }
     }
 
-    // ── Check if we have headroom ─────────────────────────────
-    ALint queued = 0;
-    alGetSourcei(alSource_, AL_BUFFERS_QUEUED, &queued);
-    if (queued >= (ALint)kNumStreamingBuffers) return;
+    // - Step 4: do we have a slot? -
+    if (freeBuffers_.empty()) return;
 
-    // ── Copy staging data (lock) ──────────────────────────────
-    std::vector<float> localSamples;
+    // - Step 5: copy staging data under lock -
+    std::vector<uint8_t> localPCM;
     UINT32 localFrames = 0;
     bool   eos         = false;
+    bool   dirty       = false;
     {
         std::lock_guard<std::mutex> lk(bufMutex_);
-        localSamples = stagingF32_;
-        localFrames  = framesPerBuffer_;
-        eos          = endOfStream_;
+        dirty       = stagingDirty_;
+        stagingDirty_ = false;
+        eos         = endOfStream_;
+        localFrames = framesPerBuffer_;
+        if (dirty) localPCM = stagingPCM_;   // copy only when new data exists
     }
 
-    if (localSamples.empty()) return;
+    // If the app hasn't called GetBuffer this cycle yet, skip -- uploading
+    // a zero-filled repeat of the previous frame wastes headroom and adds
+    // perceptible lag during silence gaps.
+    if (!dirty && !eos) return;
 
-    // ── Upload to an available AL buffer ─────────────────────
-    // Find first idle buffer (not currently queued)
-    // Simple strategy: use processed-count as ring index
-    static thread_local size_t bufIdx = 0;
-    ALuint buf = alBuffers_[bufIdx % kNumStreamingBuffers];
-    bufIdx++;
+    if (localPCM.empty() && !eos) return;   // nothing to upload
 
-    ALsizei dataSize = (ALsizei)(localSamples.size() * sizeof(float));
-    alBufferData(buf, alFormat_, localSamples.data(),
-        dataSize, (ALsizei)sampleRate_);
+    // - Upload to the free buffer -
+    ALuint buf = freeBuffers_.back();
+    freeBuffers_.pop_back();
 
-    if (alGetError() == AL_NO_ERROR) {
-        alSourceQueueBuffers(alSource_, 1, &buf);
+    if (!localPCM.empty()) {
+        ALsizei dataSize = (ALsizei)localPCM.size();
+        alBufferData(buf, alFormat_, localPCM.data(),
+                     dataSize, (ALsizei)sampleRate_);
+
+        if (alGetError() == AL_NO_ERROR) {
+            alSourceQueueBuffers(alSource_, 1, &buf);
+        } else {
+            // Put the buffer back so it can be reused next cycle
+            freeBuffers_.push_back(buf);
+            OAL_LOG(L"alBufferData error on src=" << alSource_);
+            return;
+        }
     }
 
-    // ── Restart source if it underran ────────────────────────
+    // - Restart source if it underran -
     ALint state = 0;
     alGetSourcei(alSource_, AL_SOURCE_STATE, &state);
     if (state != AL_PLAYING && active_.load(std::memory_order_acquire)) {
         alSourcePlay(alSource_);
+        OAL_LOG(L"Restarted underran source " << alSource_);
     }
 
     if (eos) {
-        // Drain naturally – do not stop immediately so last frame plays
         alSourcei(alSource_, AL_LOOPING, AL_FALSE);
+        // Do not stop immediately -- let the queued buffers drain naturally
     }
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // State management
-// ─────────────────────────────────────────────────────────────
+// -
 void SpatialAudioObjectImpl::Deactivate()
 {
     active_.store(false, std::memory_order_release);
@@ -368,13 +397,14 @@ void SpatialAudioObjectImpl::Reset()
 {
     Deactivate();
     std::lock_guard<std::mutex> lk(bufMutex_);
-    std::fill(stagingF32_.begin(), stagingF32_.end(), 0.f);
-    endOfStream_ = false;
+    std::fill(stagingPCM_.begin(), stagingPCM_.end(), 0u);
+    stagingDirty_ = false;
+    endOfStream_  = false;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -
 // QueryInterface
-// ─────────────────────────────────────────────────────────────
+// -
 STDMETHODIMP SpatialAudioObjectImpl::QueryInterface(REFIID riid, void** ppv)
 {
     if (!ppv) return E_POINTER;

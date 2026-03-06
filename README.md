@@ -235,5 +235,5 @@ elevations remain distinguishable — something channel-based virtualizers canno
 
 ## License
 
-MIT License — see LICENSE file.
+GPLv3 License — see LICENSE file.
 OpenAL Soft is distributed under the LGPL 2.1.

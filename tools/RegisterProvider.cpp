@@ -40,15 +40,44 @@
 // ---------------------------------------------------------------------------
 // Our provider CLSID {9A3B4C5D-6E7F-8901-ABCD-EF1234567890}
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GUIDs
+// ---------------------------------------------------------------------------
+
+// COM in-process server CLSID.
+// Used by DllGetClassObject -- what COM activates when asked for our renderer.
+// {9A3B4C5D-6E7F-8901-ABCD-EF1234567890}
 DEFINE_GUID(CLSID_OpenALSpatialProvider,
     0x9a3b4c5d, 0x6e7f, 0x8901,
     0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90);
 
+// Spatial format GUID.
+// This is the subkey name under Spatial\Encoder that SystemSettings.exe
+// enumerates. It also gets embedded in the per-device property blobs that
+// Windows Audio writes when the user activates a provider. It must be
+// distinct from the COM CLSID.
+// {2A7F8E1D-3C4B-5D6E-7F80-9A1B2C3D4E5F}
+DEFINE_GUID(GUID_OpenALSpatialFormat,
+    0x2a7f8e1d, 0x3c4b, 0x5d6e,
+    0x7f, 0x80, 0x9a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f);
+
 // ---------------------------------------------------------------------------
 // Registry paths
 // ---------------------------------------------------------------------------
-// The path Windows actually reads for the Sound control panel dropdown.
-// Protected by SYSTEM ACLs; we write here from a LocalSystem service.
+
+// THE PATH SystemSettings.exe reads to build the spatial sound dropdown.
+// Confirmed by Process Monitor: it calls RegOpenKey on each GUID subkey here.
+// Windows Sonic's format GUID {B53D940C-B846-4831-9F76-D102B9B725A0} was
+// attempted here and returned NAME NOT FOUND (Windows Sonic is hardcoded in
+// the audio stack and does NOT register here -- third-party providers do).
+// This path is admin-writable; no LocalSystem service required.
+static const wchar_t* kEncoderPath =
+    L"SOFTWARE\\Microsoft\\Multimedia\\Audio\\Spatial\\Encoder";
+
+// Per-device selection state. Windows Audio WRITES the selected provider's
+// format GUID into binary property blobs under this path when the user picks
+// a provider. We do NOT write here -- Windows handles it automatically once
+// the provider is selected. Kept for legacy cleanup (unregister old builds).
 static const wchar_t* kMMDevicesPath =
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\"
     L"MMDevices\\SpatialAudioEndpoint";
@@ -57,7 +86,8 @@ static const wchar_t* kMMDevicesPath =
 static const wchar_t* kCOMBase =
     L"SOFTWARE\\Classes\\CLSID";
 
-// Service name used for the one-shot SYSTEM helper
+// Service name for the MMDevices fallback writer (kept only for cleaning up
+// keys written by older builds of this tool).
 static const wchar_t* kSvcName = L"OALSpatialRegHelper";
 
 // ---------------------------------------------------------------------------
@@ -154,6 +184,83 @@ static bool UnregisterCOMServer(const GUID& clsid)
     else {
         wprintf(L"  [FAIL] COM key: error %lu %s\n", (DWORD)r,
                 Win32Msg((DWORD)r).c_str());
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Spatial\Encoder registration
+//
+// Structure (confirmed by Process Monitor + RegistryChangesView analysis):
+//
+//   HKLM\SOFTWARE\Microsoft\Multimedia\Audio\Spatial\Encoder\
+//       {format-guid}\               <- spatial FORMAT guid, not COM CLSID
+//           (default)  = "Display name shown in Settings dropdown"
+//           CLSID      = "{com-clsid}"   <- maps to InProcServer32
+//           IconPath   = "path\to\dll,0"
+//
+// The format GUID is what Windows Audio embeds in per-device property blobs
+// when the user activates the provider (the bytes seen in RegistryChangesView
+// for Windows Sonic are its format GUID {B53D940C...}, not its COM CLSID).
+// The COM CLSID in the CLSID value is what CoCreateInstance is called with.
+// ---------------------------------------------------------------------------
+static bool RegisterEncoderKey(const std::wstring& dll,
+                                const GUID& formatGuid,
+                                const GUID& comClsid)
+{
+    std::wstring fmtStr  = GuidToString(formatGuid);
+    std::wstring clsStr  = GuidToString(comClsid);
+    std::wstring key     = std::wstring(kEncoderPath) + L"\\" + fmtStr;
+
+    HKEY hk = nullptr;
+    LONG r = RegCreateKeyExW(HKEY_LOCAL_MACHINE, key.c_str(),
+                 0, nullptr, REG_OPTION_NON_VOLATILE,
+                 KEY_WRITE, nullptr, &hk, nullptr);
+    if (r != ERROR_SUCCESS) {
+        wprintf(L"  [FAIL] Encoder key: error %lu (%s)\n"
+                L"         Path: HKLM\\%s\n",
+                (DWORD)r, Win32Msg((DWORD)r).c_str(), key.c_str());
+        return false;
+    }
+
+    // Display name shown in the Settings -> Spatial audio dropdown
+    const wchar_t* name = L"OpenAL Soft 3D Audio (HRTF)";
+    RegSetValueExW(hk, nullptr, 0, REG_SZ,
+        (const BYTE*)name, (DWORD)((wcslen(name)+1)*sizeof(wchar_t)));
+
+    // CLSID value -> COM server activated when this format is selected
+    RegSetValueExW(hk, L"CLSID", 0, REG_SZ,
+        (const BYTE*)clsStr.c_str(),
+        (DWORD)((clsStr.size()+1)*sizeof(wchar_t)));
+
+    // Optional icon (first resource in our DLL)
+    std::wstring icon = dll + L",0";
+    RegSetValueExW(hk, L"IconPath", 0, REG_SZ,
+        (const BYTE*)icon.c_str(),
+        (DWORD)((icon.size()+1)*sizeof(wchar_t)));
+
+    RegCloseKey(hk);
+    wprintf(L"  [OK]  Encoder key written.\n"
+            L"        Path        : HKLM\\%s\n"
+            L"        Format GUID : %s\n"
+            L"        COM CLSID   : %s\n"
+            L"        Display name: %s\n",
+            key.c_str(), fmtStr.c_str(), clsStr.c_str(), name);
+    return true;
+}
+
+static bool UnregisterEncoderKey(const GUID& formatGuid)
+{
+    std::wstring key = std::wstring(kEncoderPath) + L"\\" + GuidToString(formatGuid);
+    LONG r = RegDeleteTreeW(HKEY_LOCAL_MACHINE, key.c_str());
+    if (r == ERROR_SUCCESS)
+        wprintf(L"  [OK]  Deleted Encoder key: HKLM\\%s\n", key.c_str());
+    else if (r == ERROR_FILE_NOT_FOUND)
+        wprintf(L"  [--]  Encoder key not found (already removed).\n");
+    else {
+        wprintf(L"  [FAIL] Encoder key: error %lu (%s)\n",
+                (DWORD)r, Win32Msg((DWORD)r).c_str());
         return false;
     }
     return true;
@@ -481,23 +588,31 @@ static bool RunAsService(const wchar_t* verb,
 static void ListProviders()
 {
     HKEY hk = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kMMDevicesPath,
-            0, KEY_READ, &hk) != ERROR_SUCCESS) {
-        wprintf(L"  Cannot read HKLM\\%s\n  (no providers registered yet)\n",
-                kMMDevicesPath);
-        return;
+    wprintf(L"  Registered Spatial\\Encoder providers\n"
+            L"  (HKLM\\%s):\n\n", kEncoderPath);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kEncoderPath,
+            0, KEY_READ, &hk) == ERROR_SUCCESS) {
+        wchar_t sub[256]; DWORD idx = 0;
+        bool any = false;
+        while (RegEnumKeyW(hk, idx++, sub, 256) == ERROR_SUCCESS) {
+            any = true;
+            std::wstring subPath = std::wstring(kEncoderPath) + L"\\" + sub;
+            std::wstring disp  = RegReadStr(HKEY_LOCAL_MACHINE,
+                                            subPath.c_str(), nullptr);
+            std::wstring clsid = RegReadStr(HKEY_LOCAL_MACHINE,
+                                            subPath.c_str(), L"CLSID");
+            wprintf(L"  Format GUID : %s\n"
+                    L"    Name  : %s\n"
+                    L"    CLSID : %s\n\n",
+                    sub,
+                    disp.empty()  ? L"(no default value)" : disp.c_str(),
+                    clsid.empty() ? L"(no CLSID value)"   : clsid.c_str());
+        }
+        if (!any) wprintf(L"  (none registered -- run 'register' first)\n");
+        RegCloseKey(hk);
+    } else {
+        wprintf(L"  Key does not exist -- run 'register' first.\n");
     }
-    wprintf(L"  Registered spatial sound providers\n"
-            L"  (HKLM\\%s):\n\n", kMMDevicesPath);
-    wchar_t sub[256]; DWORD idx = 0;
-    while (RegEnumKeyW(hk, idx++, sub, 256) == ERROR_SUCCESS) {
-        std::wstring subPath = std::wstring(kMMDevicesPath) + L"\\" + sub;
-        std::wstring disp = RegReadStr(HKEY_LOCAL_MACHINE,
-                                       subPath.c_str(), L"DisplayName");
-        wprintf(L"  %s\n    -> %s\n", sub,
-                disp.empty() ? L"(no DisplayName)" : disp.c_str());
-    }
-    RegCloseKey(hk);
 }
 
 // ---------------------------------------------------------------------------
@@ -709,16 +824,24 @@ int wmain(int argc, wchar_t* argv[])
     if (cmd == L"list")     { ListProviders(); return 0; }
 
     if (cmd == L"unregister") {
-        wprintf(L"[Step 1] Removing COM server...\n");
+        wprintf(L"[Step 1] Removing COM server (InProcServer32)...\n");
         UnregisterCOMServer(CLSID_OpenALSpatialProvider);
 
-        wprintf(L"\n[Step 2] Removing MMDevices key via LocalSystem service...\n");
+        wprintf(L"\n[Step 2] Removing Spatial\\Encoder key...\n");
+        UnregisterEncoderKey(GUID_OpenALSpatialFormat);
+
+        // Step 3: Clean up any MMDevices key written by older builds of this
+        // tool. The LocalSystem service is still needed here because we wrote
+        // to a SYSTEM-protected path in previous versions. Non-fatal if it
+        // fails (key may not exist on clean installs of the new build).
+        wprintf(L"\n[Step 3] Cleaning up legacy MMDevices key (if any)...\n");
         if (!RunAsService(L"delete", L"", CLSID_OpenALSpatialProvider)) {
-            wprintf(L"  [FAIL] Service-based removal failed.\n");
-            return 1;
+            wprintf(L"  [--]  Legacy MMDevices key not found or already removed.\n");
+        } else {
+            wprintf(L"  [OK]  Legacy MMDevices key removed.\n");
         }
-        wprintf(L"  [OK]  MMDevices key removed.\n");
-        wprintf(L"\nUnregistered. Restart the audio service to take effect:\n"
+
+        wprintf(L"\nUnregistered. Restart the audio service:\n"
                 L"  net stop audiosrv && net start audiosrv\n");
         return 0;
     }
@@ -747,31 +870,29 @@ int wmain(int argc, wchar_t* argv[])
         dll = abs;
         wprintf(L"  DLL: %s\n\n", dll.c_str());
 
-        // Step 1: COM registration (admin-writable, no service needed)
-        wprintf(L"[Step 1] Registering COM server...\n");
+        // Step 1: COM InProcServer32 entry (admin-writable)
+        wprintf(L"[Step 1] Registering COM server (InProcServer32)...\n");
         if (!RegisterCOMServer(dll, CLSID_OpenALSpatialProvider)) return 1;
 
-        // Step 2: MMDevices key via LocalSystem service
-        wprintf(L"\n[Step 2] Writing MMDevices\\SpatialAudioEndpoint key\n"
-                L"         via one-shot LocalSystem service...\n");
-        if (!RunAsService(L"write", dll, CLSID_OpenALSpatialProvider)) {
-            wprintf(L"  [FAIL] Service-based registration failed.\n"
-                    L"  Run 'RegisterProvider.exe diagnose' for details.\n");
-            return 1;
-        }
-        wprintf(L"  [OK]  MMDevices\\SpatialAudioEndpoint key written.\n");
+        // Step 2: Spatial\Encoder key -- what SystemSettings.exe reads to
+        // build the spatial sound dropdown. Admin-writable, no service needed.
+        // The subkey name is the spatial FORMAT GUID (not the COM CLSID).
+        // The CLSID value inside it maps to our InProcServer32 entry above.
+        wprintf(L"\n[Step 2] Writing Spatial\\Encoder provider key...\n");
+        if (!RegisterEncoderKey(dll,
+                                GUID_OpenALSpatialFormat,
+                                CLSID_OpenALSpatialProvider)) return 1;
 
         wprintf(L"\nRegistration complete!\n\n"
                 L"To activate:\n"
                 L"  1. Restart the audio service:\n"
                 L"       net stop audiosrv && net start audiosrv\n"
-                L"  2. Right-click the speaker in the tray -> Spatial sound\n"
-                L"     'OpenAL Soft 3D Audio (HRTF)' should now appear.\n"
-                L"  3. Alternatively select it from:\n"
-                L"       Settings -> System -> Sound -> [your headphones]\n"
-                L"       -> Spatial audio\n\n"
-                L"To verify:\n"
-                L"  RegisterProvider.exe list\n");
+                L"  2. Open Settings -> System -> Sound -> [your output device]\n"
+                L"     -> Spatial audio  (or right-click the tray speaker icon\n"
+                L"        -> Spatial sound)\n"
+                L"     'OpenAL Soft 3D Audio (HRTF)' should now appear.\n\n"
+                L"If it does not appear, run:\n"
+                L"  RegisterProvider.exe diagnose\n");
         return 0;
     }
 

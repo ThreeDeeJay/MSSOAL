@@ -195,7 +195,7 @@ if (OPENAL_SPATIAL_BUILD_REGISTER)
         WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
     )
     target_link_libraries(RegisterProvider PRIVATE
-        advapi32 shlwapi
+        advapi32 shlwapi ole32
     )
     set_target_properties(RegisterProvider PROPERTIES
         WIN32_EXECUTABLE FALSE

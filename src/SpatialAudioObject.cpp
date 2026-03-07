@@ -297,13 +297,14 @@ void SpatialAudioObjectImpl::ApplySpatialParams(const ObjectSpatialParams& p)
 // -
 // UploadPendingBuffers -- called from AL thread once per render cycle.
 //
-// Stale-frame policy: if the app hasn't called GetBuffer this cycle
-// (stagingDirty_ == false), we upload the previous frame's PCM again
-// rather than skipping. A repeated 10ms frame is inaudible at normal
-// frequencies; a skipped upload that drains the queue causes a click.
-// This matters because Sleep() has ~15ms OS granularity without
-// timeBeginPeriod(1) -- the app loop and AL loop can drift, meaning
-// the AL thread often wakes before the app has written new data.
+// KEY FIX FOR POPS: drain the ENTIRE freeBuffers_ list each call,
+// not just one slot. With kNumStreamingBuffers=8 this keeps 8x10ms=80ms
+// of audio queued at all times. Any Sleep() jitter in the app loop is
+// absorbed by the deep queue rather than causing an underrun + pop.
+//
+// Repeat-frame policy: once we queue the fresh staging frame, we fill
+// all remaining free slots with copies of the same frame. A repeated
+// 10ms frame is inaudible; an empty queue causes an audible click.
 // -
 void SpatialAudioObjectImpl::UploadPendingBuffers()
 {
@@ -320,9 +321,9 @@ void SpatialAudioObjectImpl::UploadPendingBuffers()
         }
     }
 
-    if (freeBuffers_.empty()) return;   // source still consuming; nothing to do
+    if (freeBuffers_.empty()) return;
 
-    // Copy staging -- always, whether fresh or stale
+    // Snapshot staging once
     std::vector<uint8_t> localPCM;
     bool eos = false;
     {
@@ -334,21 +335,27 @@ void SpatialAudioObjectImpl::UploadPendingBuffers()
 
     if (localPCM.empty()) return;
 
-    ALuint buf = freeBuffers_.back();
-    freeBuffers_.pop_back();
+    // Fill EVERY free slot with the current frame (fresh or repeat).
+    // This is the core fix: keeps the queue full instead of 1-deep.
+    while (!freeBuffers_.empty()) {
+        ALuint buf = freeBuffers_.back();
+        freeBuffers_.pop_back();
 
-    alBufferData(buf, alFormat_, localPCM.data(),
-                 (ALsizei)localPCM.size(), (ALsizei)sampleRate_);
+        alBufferData(buf, alFormat_, localPCM.data(),
+                     (ALsizei)localPCM.size(), (ALsizei)sampleRate_);
 
-    if (alGetError() == AL_NO_ERROR) {
-        alSourceQueueBuffers(alSource_, 1, &buf);
-    } else {
-        freeBuffers_.push_back(buf);
-        OAL_LOG(L"alBufferData error on src=" << alSource_);
-        return;
+        if (alGetError() == AL_NO_ERROR) {
+            alSourceQueueBuffers(alSource_, 1, &buf);
+        } else {
+            freeBuffers_.push_back(buf);
+            OAL_LOG(L"alBufferData error on src=" << alSource_);
+            break;
+        }
+
+        if (eos) break;   // don't pad after end-of-stream
     }
 
-    // Restart source if it underran while we were filling
+    // Restart source if it underran while the queue was being filled
     ALint state = 0;
     alGetSourcei(alSource_, AL_SOURCE_STATE, &state);
     if (state != AL_PLAYING && active_.load(std::memory_order_acquire)) {

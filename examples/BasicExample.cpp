@@ -223,22 +223,22 @@ static void InitObjects()
 {
     // [0] Continuous pink noise: slow wide orbit, slightly elevated
     gObjs[0].init(ObjKind::PinkContinuous,
-        /*speed*/0.40f, /*r*/3.5f, /*h*/0.3f, /*phase*/0.f);
+        /*speed*/0.40f, /*r*/1.0f, /*h*/0.3f, /*phase*/0.f);
 
     // [1] Intermittent pink noise: medium orbit, opposite direction
     gObjs[1].init(ObjKind::PinkIntermittent,
-        /*speed*/-0.70f, /*r*/2.0f, /*h*/-0.2f, /*phase*/kPi);
+        /*speed*/-0.70f, /*r*/1.0f, /*h*/-0.2f, /*phase*/kPi);
     gObjs[1].burstOn  = 0.9f;
     gObjs[1].burstOff = 1.3f;
 
     // [2] Low tone (110 Hz): figure-eight path (Lissajous)
     gObjs[2].init(ObjKind::LowTone,
-        /*speed*/0.55f, /*r*/2.5f, /*h*/0.f,
-        /*phase*/kPi*0.5f, /*tiltFreq*/2.0f, /*tiltAmp*/1.2f);
+        /*speed*/0.55f, /*r*/1.0f, /*h*/0.f,
+        /*phase*/kPi*0.5f, /*tiltFreq*/2.0f, /*tiltAmp*/0.5f);
 
     // [3] High tone (880 Hz): fast tight circle overhead
     gObjs[3].init(ObjKind::HighTone,
-        /*speed*/1.40f, /*r*/1.2f, /*h*/1.5f, /*phase*/kPi*1.5f);
+        /*speed*/1.40f, /*r*/1.0f, /*h*/0.6f, /*phase*/kPi*1.5f);
 }
 
 // ----------------------------------------------------------------
@@ -482,12 +482,37 @@ static int SetupAndRun(ISpatialAudioClient* client,
     pv.blob.pBlobData = reinterpret_cast<BYTE*>(&sp);
 
     ComPtr<ISpatialAudioObjectRenderStream> stream;
-    if (!CHECK(client->ActivateSpatialAudioStream(
-            &pv, __uuidof(ISpatialAudioObjectRenderStream),
-            reinterpret_cast<void**>(stream.GetAddressOf())))) {
+    HRESULT activateHR = client->ActivateSpatialAudioStream(
+        &pv, __uuidof(ISpatialAudioObjectRenderStream),
+        reinterpret_cast<void**>(stream.GetAddressOf()));
+
+    if (FAILED(activateHR)) {
+        // E_INVALIDARG (0x80070057) from the real Windows Spatial Audio stack
+        // almost always means spatial audio is turned off on the device --
+        // the ISpatialAudioClient was obtained but the stream cannot be opened
+        // because no spatializer is active.
+        if (activateHR == E_INVALIDARG && mode == Mode::MSSAPI) {
+            fprintf(stderr,
+                "  [--]  ActivateSpatialAudioStream: Spatial audio is off.\n\n"
+                "  The Windows Spatial Audio stack returned E_INVALIDARG because\n"
+                "  no spatial sound provider is currently active on the device.\n\n"
+                "  To fix:\n"
+                "    Right-click the speaker tray icon -> Spatial sound\n"
+                "    and select Windows Sonic for Headphones, Dolby Atmos,\n"
+                "    or our registered OpenAL provider.\n\n"
+                "  Then retry: BasicExample.exe --mode mssapi\n\n"
+                "  The direct OpenAL mode works without any spatial sound\n"
+                "  provider active:\n"
+                "    BasicExample.exe --mode openal\n");
+        } else {
+            fprintf(stderr,
+                "  [FAIL] ActivateSpatialAudioStream  hr=0x%08X (%s)\n",
+                (unsigned)activateHR, HRName(activateHR));
+        }
         if (hEvent) CloseHandle(hEvent);
         return 1;
     }
+    printf("  [OK]   ActivateSpatialAudioStream\n");
     printf("\n");
 
     printf("[Step 5] Starting stream...\n");
@@ -519,8 +544,8 @@ static int SetupAndRun(ISpatialAudioClient* client,
             for (int i = 0; i < 4; ++i) {
                 OpenALSpatial::ObjectSpatialParams osp;
                 osp.referenceDistance = 1.0f;
-                osp.maxDistance       = 30.0f;
-                osp.rolloffFactor     = 0.8f;
+                osp.maxDistance       = 5.0f;
+                osp.rolloffFactor     = 1.0f;
                 osp.distModel =
                     OpenALSpatial::DistanceModel::InverseDistanceClamped;
                 ext->SetObjectSpatialParams(rawPtrs[i], osp);

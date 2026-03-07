@@ -67,7 +67,6 @@ static const char* HRName(HRESULT hr)
     case (unsigned)AUDCLNT_E_DEVICE_INVALIDATED:  return "AUDCLNT_E_DEVICE_INVALIDATED";
     case 0x88890020u:                             return "SPTLAUDCLNT_E_OBJECT_NOTVALID";
     case 0x88890017u:                             return "SPTLAUDCLNT_E_NO_MORE_OBJECTS";
-    case 0x88890004u:                             return "SPTLAUDCLNT_E_INTERNAL";
     default:                                      return "(unknown)";
     }
 }

@@ -297,23 +297,19 @@ void SpatialAudioObjectImpl::ApplySpatialParams(const ObjectSpatialParams& p)
 // -
 // UploadPendingBuffers -- called from AL thread once per render cycle.
 //
-// Correct streaming buffer protocol:
-//   1. Ask OpenAL how many buffers it has finished playing (AL_BUFFERS_PROCESSED).
-//   2. Unqueue those finished buffers -- they are now safe to refill.
-//   3. Put each unqueued buffer ID onto our freeBuffers_ list.
-//   4. If freeBuffers_ is empty we have no slot to write into -- skip (source
-//      is still consuming last frame; the app is calling too fast).
-//   5. Take one free buffer ID, call alBufferData() on it, then queue it.
-//
-// The old code used a blind modulo ring index and called alBufferData() on
-// buffers that might still be queued, causing AL_INVALID_OPERATION 0xa004
-// ("Modifying storage for in-use buffer").
+// Stale-frame policy: if the app hasn't called GetBuffer this cycle
+// (stagingDirty_ == false), we upload the previous frame's PCM again
+// rather than skipping. A repeated 10ms frame is inaudible at normal
+// frequencies; a skipped upload that drains the queue causes a click.
+// This matters because Sleep() has ~15ms OS granularity without
+// timeBeginPeriod(1) -- the app loop and AL loop can drift, meaning
+// the AL thread often wakes before the app has written new data.
 // -
 void SpatialAudioObjectImpl::UploadPendingBuffers()
 {
     if (!alReady_ || !alSource_) return;
 
-    // - Step 1 & 3: reclaim all buffers OpenAL has finished with -
+    // Reclaim every buffer OpenAL has finished consuming
     {
         ALint processed = 0;
         alGetSourcei(alSource_, AL_BUFFERS_PROCESSED, &processed);
@@ -324,50 +320,35 @@ void SpatialAudioObjectImpl::UploadPendingBuffers()
         }
     }
 
-    // - Step 4: do we have a slot? -
-    if (freeBuffers_.empty()) return;
+    if (freeBuffers_.empty()) return;   // source still consuming; nothing to do
 
-    // - Step 5: copy staging data under lock -
+    // Copy staging -- always, whether fresh or stale
     std::vector<uint8_t> localPCM;
-    UINT32 localFrames = 0;
-    bool   eos         = false;
-    bool   dirty       = false;
+    bool eos = false;
     {
         std::lock_guard<std::mutex> lk(bufMutex_);
-        dirty       = stagingDirty_;
         stagingDirty_ = false;
-        eos         = endOfStream_;
-        localFrames = framesPerBuffer_;
-        if (dirty) localPCM = stagingPCM_;   // copy only when new data exists
+        eos      = endOfStream_;
+        localPCM = stagingPCM_;
     }
 
-    // If the app hasn't called GetBuffer this cycle yet, skip -- uploading
-    // a zero-filled repeat of the previous frame wastes headroom and adds
-    // perceptible lag during silence gaps.
-    if (!dirty && !eos) return;
+    if (localPCM.empty()) return;
 
-    if (localPCM.empty() && !eos) return;   // nothing to upload
-
-    // - Upload to the free buffer -
     ALuint buf = freeBuffers_.back();
     freeBuffers_.pop_back();
 
-    if (!localPCM.empty()) {
-        ALsizei dataSize = (ALsizei)localPCM.size();
-        alBufferData(buf, alFormat_, localPCM.data(),
-                     dataSize, (ALsizei)sampleRate_);
+    alBufferData(buf, alFormat_, localPCM.data(),
+                 (ALsizei)localPCM.size(), (ALsizei)sampleRate_);
 
-        if (alGetError() == AL_NO_ERROR) {
-            alSourceQueueBuffers(alSource_, 1, &buf);
-        } else {
-            // Put the buffer back so it can be reused next cycle
-            freeBuffers_.push_back(buf);
-            OAL_LOG(L"alBufferData error on src=" << alSource_);
-            return;
-        }
+    if (alGetError() == AL_NO_ERROR) {
+        alSourceQueueBuffers(alSource_, 1, &buf);
+    } else {
+        freeBuffers_.push_back(buf);
+        OAL_LOG(L"alBufferData error on src=" << alSource_);
+        return;
     }
 
-    // - Restart source if it underran -
+    // Restart source if it underran while we were filling
     ALint state = 0;
     alGetSourcei(alSource_, AL_SOURCE_STATE, &state);
     if (state != AL_PLAYING && active_.load(std::memory_order_acquire)) {
@@ -377,7 +358,6 @@ void SpatialAudioObjectImpl::UploadPendingBuffers()
 
     if (eos) {
         alSourcei(alSource_, AL_LOOPING, AL_FALSE);
-        // Do not stop immediately -- let the queued buffers drain naturally
     }
 }
 

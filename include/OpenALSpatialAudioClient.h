@@ -59,7 +59,7 @@ namespace OpenALSpatial {
 constexpr UINT32 kMaxDynamicObjects = 256;
 constexpr UINT32 kDefaultFramesPerBuffer = 480;   // 10 ms @ 48 kHz
 constexpr UINT32 kDefaultSampleRate = 48000;
-constexpr UINT32 kNumStreamingBuffers = 4;        // ring-buffer depth
+constexpr UINT32 kNumStreamingBuffers = 8;        // ring-buffer depth (8x10ms = 80ms headroom)
 
 // -
 // HRTF configuration

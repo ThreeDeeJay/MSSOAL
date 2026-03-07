@@ -1,30 +1,24 @@
 /**
  * BasicExample.cpp
  * ============================================================
- * 4 sine-tone objects orbiting the listener, demonstrating two
- * distinct rendering back-ends selectable at the command line:
+ * Four audio objects on distinct orbits, demonstrating two
+ * rendering back-ends selectable at the command line:
  *
- *   BasicExample.exe [--mode openal]
- *     Direct path: our ISpatialAudioClient shim talks straight
- *     to OpenAL Soft. Windows Audio is not involved at all.
+ *   BasicExample.exe [--mode openal]   (default)
+ *     Direct -> OpenAL Soft. Windows Spatial Audio not involved.
  *     Works without any spatial sound provider registered.
- *     This is the default mode.
  *
  *   BasicExample.exe --mode mssapi
- *     Windows path: uses the real ISpatialAudioClient from the
- *     Windows Audio stack. Requires a spatial sound provider
- *     (Windows Sonic, Dolby Atmos, or our registered provider)
- *     to be active on the default output device in Sound settings.
- *     Useful for validating the provider registration end-to-end.
+ *     Real Windows Spatial Audio stack. Requires a spatial sound
+ *     provider (Windows Sonic, Dolby Atmos, or our registered
+ *     provider) to be active in Sound settings on the default
+ *     output device.
  *
- * Timing notes:
- *   Both modes call timeBeginPeriod(1) so Sleep() has 1ms
- *   granularity instead of the default ~15ms, preventing the
- *   app loop from oversleeping and starving the AL upload thread.
- *   The MSSAPI loop is event-driven (WaitForSingleObject on the
- *   event handle returned by Windows Audio) as required by the
- *   real ISpatialAudioClient -- passing a null EventHandle to the
- *   real stack returns E_INVALIDARG.
+ * Audio objects:
+ *   [0] Continuous pink noise  -- wide orbit, constant
+ *   [1] Intermittent pink noise -- tight orbit, bursts every ~1.2 s
+ *   [2] Continuous low note (110 Hz)  -- figure-eight path
+ *   [3] Continuous high note (880 Hz) -- fast tight circle overhead
  *
  * Build:
  *   cl BasicExample.cpp /std:c++17 /I..\include
@@ -37,16 +31,17 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <timeapi.h>           // timeBeginPeriod / timeEndPeriod
+#include <timeapi.h>
 #include <spatialaudioclient.h>
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
 #include <mmreg.h>
-
-#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <cstdint>
+#include <atomic>
 #include <thread>
 
 #include "../include/OpenALSpatialAudioClient.h"
@@ -57,12 +52,13 @@
 
 using Microsoft::WRL::ComPtr;
 
-static constexpr float kPi = 3.14159265358979323846f;
+static constexpr float kPi  = 3.14159265358979323846f;
+static constexpr float k2Pi = 2.f * kPi;
 
 enum class Mode { OpenAL, MSSAPI };
 
 // ----------------------------------------------------------------
-// HRESULT helpers
+// HRESULT name table
 // ----------------------------------------------------------------
 static const char* HRName(HRESULT hr)
 {
@@ -76,16 +72,30 @@ static const char* HRName(HRESULT hr)
     case (unsigned)AUDCLNT_E_UNSUPPORTED_FORMAT:  return "AUDCLNT_E_UNSUPPORTED_FORMAT";
     case (unsigned)AUDCLNT_E_SERVICE_NOT_RUNNING: return "AUDCLNT_E_SERVICE_NOT_RUNNING";
     case (unsigned)AUDCLNT_E_OUT_OF_ORDER:        return "AUDCLNT_E_OUT_OF_ORDER";
-    case (unsigned)AUDCLNT_E_DEVICE_INVALIDATED:  return "AUDCLNT_E_DEVICE_INVALIDATED";
+    case (unsigned)AUDCLNT_E_DEVICE_INVALIDATED:  return "AUDCLNT_E_DEVICE_INVALIDATED (spatial audio turned off)";
     case 0x88890020u:                             return "SPTLAUDCLNT_E_OBJECT_NOTVALID";
     case 0x88890017u:                             return "SPTLAUDCLNT_E_NO_MORE_OBJECTS";
+    case 0x88890100u:                             return "SPTLAUDCLNT_E_DESTROYED (spatial audio turned off)";
     default:                                      return "(unknown)";
     }
+}
+
+// Returns true if the HRESULT signals the user disabled spatial audio --
+// this is expected and should terminate the loop gracefully, not as a crash.
+static bool IsDeviceGone(HRESULT hr)
+{
+    return hr == (HRESULT)0x88890100  // SPTLAUDCLNT_E_DESTROYED
+        || hr == AUDCLNT_E_DEVICE_INVALIDATED;
 }
 
 static bool CHK(HRESULT hr, const char* callSite)
 {
     if (SUCCEEDED(hr)) { printf("  [OK]   %s\n", callSite); return true; }
+    if (IsDeviceGone(hr)) {
+        printf("  [--]   %s  (spatial audio disabled -- hr=0x%08X)\n",
+            callSite, (unsigned)hr);
+        return false;
+    }
     fprintf(stderr, "  [FAIL] %s  hr=0x%08X (%s)\n",
         callSite, (unsigned)hr, HRName(hr));
     return false;
@@ -93,25 +103,146 @@ static bool CHK(HRESULT hr, const char* callSite)
 #define CHECK(expr) CHK((expr), #expr)
 
 // ----------------------------------------------------------------
-// Sine synthesis
+// Pink noise generator (Paul Kellet's "economy" method)
+// Produces perceptually flat spectral density; much more natural
+// than white noise or tones for spatial audio demos.
 // ----------------------------------------------------------------
-static void GenerateSine(float* buf, UINT32 frames,
-                          float freq, float sr, float& phase)
-{
-    const float step = 2.f * kPi * freq / sr;
-    for (UINT32 i = 0; i < frames; ++i) {
-        buf[i]  = 0.20f * std::sinf(phase);
-        phase  += step;
-        if (phase > 2.f * kPi) phase -= 2.f * kPi;
+struct PinkNoise {
+    float b0=0,b1=0,b2=0,b3=0,b4=0,b5=0,b6=0;
+    uint32_t rng = 0x12345678u;
+
+    float next()
+    {
+        // LCG white noise
+        rng = rng * 1664525u + 1013904223u;
+        float w = (float)(int32_t)rng / (float)0x80000000u;
+
+        b0 = 0.99886f*b0 + w*0.0555179f;
+        b1 = 0.99332f*b1 + w*0.0750759f;
+        b2 = 0.96900f*b2 + w*0.1538520f;
+        b3 = 0.86650f*b3 + w*0.3104856f;
+        b4 = 0.55000f*b4 + w*0.5329522f;
+        b5 = -0.7616f*b5 - w*0.0168980f;
+        float pink = b0+b1+b2+b3+b4+b5+b6 + w*0.5362f;
+        b6 = w * 0.115926f;
+        return pink * 0.11f;   // normalise to approx -1..1
     }
+};
+
+// ----------------------------------------------------------------
+// Sine oscillator
+// ----------------------------------------------------------------
+struct Sine {
+    float phase = 0.f;
+    float next(float freq, float sr)
+    {
+        float v = std::sinf(phase);
+        phase += k2Pi * freq / sr;
+        if (phase > k2Pi) phase -= k2Pi;
+        return v * 0.20f;
+    }
+};
+
+// ----------------------------------------------------------------
+// Per-object state (audio generator + orbital path)
+// ----------------------------------------------------------------
+enum class ObjKind { PinkContinuous, PinkIntermittent, LowTone, HighTone };
+
+struct ObjState {
+    ObjKind kind;
+    PinkNoise pink;
+    Sine      sine;
+
+    // Intermittent burst state
+    float burstTimer  = 0.f;   // seconds elapsed in current phase
+    bool  burstActive = true;  // currently in the "on" phase
+    float burstOn     = 0.9f;  // seconds of sound
+    float burstOff    = 1.3f;  // seconds of silence
+
+    // Orbital params
+    float speed      = 0.f;   // rad/s
+    float radius     = 1.f;
+    float height     = 0.f;
+    float phaseOff   = 0.f;   // initial angle offset
+    float tiltFreq   = 0.f;   // figure-eight tilt rate
+    float tiltAmp    = 0.f;   // figure-eight tilt amplitude
+
+    float angle      = 0.f;   // accumulated angle (updated each frame)
+
+    void init(ObjKind k, float spd, float r, float h,
+              float poff, float tf = 0.f, float ta = 0.f)
+    {
+        kind = k; speed = spd; radius = r; height = h;
+        phaseOff = poff; tiltFreq = tf; tiltAmp = ta;
+        angle = poff;
+    }
+
+    // Advance by dt seconds; writes frameCount float32 samples into buf.
+    // Returns current 3D position in x/y/z.
+    void tick(float* buf, UINT32 frames, float sr, float dt,
+              float& ox, float& oy, float& oz)
+    {
+        angle += speed * dt;
+        if (angle > k2Pi) angle -= k2Pi;
+
+        ox = radius * std::cosf(angle);
+        oz = radius * std::sinf(angle);
+        oy = height + tiltAmp * std::sinf(tiltFreq * angle);
+
+        float vol = 1.f;
+        if (kind == ObjKind::PinkIntermittent) {
+            burstTimer += dt;
+            if (burstActive && burstTimer >= burstOn) {
+                burstActive = false; burstTimer = 0.f;
+            } else if (!burstActive && burstTimer >= burstOff) {
+                burstActive = true;  burstTimer = 0.f;
+            }
+            vol = burstActive ? 1.f : 0.f;
+        }
+
+        for (UINT32 i = 0; i < frames; ++i) {
+            switch (kind) {
+            case ObjKind::PinkContinuous:
+            case ObjKind::PinkIntermittent:
+                buf[i] = pink.next() * vol;
+                break;
+            case ObjKind::LowTone:
+                buf[i] = sine.next(110.f, sr);
+                break;
+            case ObjKind::HighTone:
+                buf[i] = sine.next(880.f, sr);
+                break;
+            }
+        }
+    }
+};
+
+static ObjState gObjs[4];
+
+static void InitObjects()
+{
+    // [0] Continuous pink noise: slow wide orbit, slightly elevated
+    gObjs[0].init(ObjKind::PinkContinuous,
+        /*speed*/0.40f, /*r*/3.5f, /*h*/0.3f, /*phase*/0.f);
+
+    // [1] Intermittent pink noise: medium orbit, opposite direction
+    gObjs[1].init(ObjKind::PinkIntermittent,
+        /*speed*/-0.70f, /*r*/2.0f, /*h*/-0.2f, /*phase*/kPi);
+    gObjs[1].burstOn  = 0.9f;
+    gObjs[1].burstOff = 1.3f;
+
+    // [2] Low tone (110 Hz): figure-eight path (Lissajous)
+    gObjs[2].init(ObjKind::LowTone,
+        /*speed*/0.55f, /*r*/2.5f, /*h*/0.f,
+        /*phase*/kPi*0.5f, /*tiltFreq*/2.0f, /*tiltAmp*/1.2f);
+
+    // [3] High tone (880 Hz): fast tight circle overhead
+    gObjs[3].init(ObjKind::HighTone,
+        /*speed*/1.40f, /*r*/1.2f, /*h*/1.5f, /*phase*/kPi*1.5f);
 }
 
 // ----------------------------------------------------------------
 // MSSAPI: obtain ISpatialAudioClient from the default render device
-//
-// The real Windows stack requires IMMDeviceEnumerator to get an
-// IMMDevice, then IMMDevice::Activate(ISpatialAudioClient).
-// This will fail if no spatial sound provider is active in Settings.
 // ----------------------------------------------------------------
 static HRESULT CreateMSSAPIClient(ComPtr<ISpatialAudioClient>& out)
 {
@@ -121,8 +252,7 @@ static HRESULT CreateMSSAPIClient(ComPtr<ISpatialAudioClient>& out)
         CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
     if (FAILED(hr)) {
         fprintf(stderr,
-            "  CoCreateInstance(MMDeviceEnumerator): 0x%08X (%s)\n"
-            "  Windows Audio service may not be running.\n",
+            "  CoCreateInstance(MMDeviceEnumerator): 0x%08X (%s)\n",
             (unsigned)hr, HRName(hr));
         return hr;
     }
@@ -135,20 +265,18 @@ static HRESULT CreateMSSAPIClient(ComPtr<ISpatialAudioClient>& out)
         return hr;
     }
 
-    hr = device->Activate(
-        __uuidof(ISpatialAudioClient), CLSCTX_INPROC_SERVER,
-        nullptr, reinterpret_cast<void**>(out.GetAddressOf()));
+    hr = device->Activate(__uuidof(ISpatialAudioClient),
+        CLSCTX_INPROC_SERVER, nullptr,
+        reinterpret_cast<void**>(out.GetAddressOf()));
 
     if (FAILED(hr)) {
         fprintf(stderr,
             "  IMMDevice::Activate(ISpatialAudioClient): 0x%08X (%s)\n\n"
-            "  CAUSE: No spatial sound provider is active on the default\n"
-            "  output device.\n\n"
-            "  FIX:\n"
-            "    1. Right-click the speaker tray icon -> Spatial sound\n"
-            "       and select Windows Sonic, Dolby Atmos, or our provider.\n"
-            "    2. Retry: BasicExample.exe --mode mssapi\n\n"
-            "  The default openal mode works without any registration:\n"
+            "  CAUSE: No spatial sound provider is active.\n"
+            "  FIX:   Right-click the speaker tray icon -> Spatial sound\n"
+            "         and select Windows Sonic, Dolby Atmos, or our provider.\n"
+            "         Then retry: BasicExample.exe --mode mssapi\n\n"
+            "  The direct mode works without registration:\n"
             "    BasicExample.exe --mode openal\n",
             (unsigned)hr, HRName(hr));
     }
@@ -156,91 +284,89 @@ static HRESULT CreateMSSAPIClient(ComPtr<ISpatialAudioClient>& out)
 }
 
 // ----------------------------------------------------------------
-// Shared per-frame audio writing (identical API in both modes)
+// Disable console QuickEdit so clicking the window doesn't freeze
+// the process (Windows pauses output when the user starts a selection)
 // ----------------------------------------------------------------
-static void WriteFrame(
-    ISpatialAudioObject* objects[4], int count,
-    float freqs[4], float sr, float phases[4],
-    UINT32 frameCount, float& orbAngle, float dt)
+static void DisableConsoleQuickEdit()
 {
-    for (int i = 0; i < count; ++i) {
-        if (!objects[i]) continue;
-        BOOL active = FALSE;
-        objects[i]->IsActive(&active);
-        if (!active) continue;
-
-        float angle  = orbAngle + i * (2.f * kPi / 4.f);
-        float radius = 2.0f + (float)(i % 2) * 1.5f;
-        objects[i]->SetPosition(
-            radius * std::cosf(angle),
-            0.8f * std::sinf(angle * 0.5f),
-            radius * std::sinf(angle));
-
-        BYTE*  buf    = nullptr;
-        UINT32 bufLen = 0;
-        if (SUCCEEDED(objects[i]->GetBuffer(&buf, &bufLen)) && buf && frameCount > 0)
-            GenerateSine(reinterpret_cast<float*>(buf),
-                         frameCount, freqs[i], sr, phases[i]);
-    }
-    orbAngle += (0.6f * dt);
-    if (orbAngle > 2.f * kPi) orbAngle -= 2.f * kPi;
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    if (hStdin == INVALID_HANDLE_VALUE) return;
+    DWORD mode = 0;
+    if (!GetConsoleMode(hStdin, &mode)) return;
+    // ENABLE_QUICK_EDIT_MODE = 0x0040, ENABLE_EXTENDED_FLAGS = 0x0080
+    mode &= ~0x0040u;
+    mode |=  0x0080u;
+    SetConsoleMode(hStdin, mode);
 }
 
 // ----------------------------------------------------------------
-// OpenAL render loop
-//
-// Timing: timeBeginPeriod(1) gives Sleep 1ms resolution so the
-// 10ms sleep does not balloon to 15ms and starve the AL upload
-// thread. The AL thread also has a built-in repeat-last-frame
-// policy so brief oversleeps don't cause audible gaps.
+// One BeginUpdating / EndUpdating cycle, shared by both modes
+// ----------------------------------------------------------------
+static bool DoFrame(ISpatialAudioObjectRenderStream* stream,
+                    ISpatialAudioObject* rawPtrs[4],
+                    float sr, float dt,
+                    UINT32 iter, HRESULT& loopHR)
+{
+    UINT32 available = 0, frameCount = 0;
+    loopHR = stream->BeginUpdatingAudioObjects(&available, &frameCount);
+    if (FAILED(loopHR)) return false;
+
+    if (iter % 100 == 0)
+        printf("[Loop %4u] available=%u frameCount=%u\n",
+            iter, available, frameCount);
+
+    for (int i = 0; i < 4; ++i) {
+        if (!rawPtrs[i]) continue;
+        BOOL active = FALSE;
+        rawPtrs[i]->IsActive(&active);
+        if (!active) continue;
+
+        BYTE* buf = nullptr; UINT32 bufLen = 0;
+        if (FAILED(rawPtrs[i]->GetBuffer(&buf, &bufLen)) || !buf) continue;
+
+        float ox=0, oy=0, oz=0;
+        gObjs[i].tick(reinterpret_cast<float*>(buf),
+                      frameCount, sr, dt, ox, oy, oz);
+        rawPtrs[i]->SetPosition(ox, oy, oz);
+    }
+
+    loopHR = stream->EndUpdatingAudioObjects();
+    return SUCCEEDED(loopHR);
+}
+
+// ----------------------------------------------------------------
+// OpenAL render loop -- Sleep-based with 1ms timer resolution
 // ----------------------------------------------------------------
 static int RunOpenALLoop(
     ISpatialAudioObjectRenderStream* stream,
-    ISpatialAudioObject* objects[4],
+    ISpatialAudioObject* rawPtrs[4],
     const WAVEFORMATEX& wfx,
     ISpatialAudioClient* client)
 {
-    const float sr         = static_cast<float>(wfx.nSamplesPerSec);
     UINT32 framesPerBuffer = 0;
     client->GetMaxFrameCount(&wfx, &framesPerBuffer);
-    const float dt = static_cast<float>(framesPerBuffer) / sr;
-
-    float phases[4] = {};
-    float freqs[4]  = { 220.f, 330.f, 440.f, 550.f };
-    float orbAngle  = 0.f;
-    UINT32 iter     = 0;
+    const float sr = (float)wfx.nSamplesPerSec;
+    const float dt = (float)framesPerBuffer / sr;
 
     std::atomic<bool> stopFlag{ false };
-    std::thread([&stopFlag] { (void)getchar();
-        stopFlag.store(true, std::memory_order_release); }).detach();
+    std::thread([&stopFlag] {
+        (void)getchar();
+        stopFlag.store(true, std::memory_order_release);
+    }).detach();
 
-    // 1ms timer resolution -- prevents Sleep(10) from sleeping 15ms
-    timeBeginPeriod(1);
+    timeBeginPeriod(1);   // 1ms Sleep granularity
 
+    UINT32 iter = 0;
     HRESULT loopHR = S_OK;
     while (!stopFlag.load(std::memory_order_acquire)) {
-        UINT32 available = 0, frameCount = 0;
-        loopHR = stream->BeginUpdatingAudioObjects(&available, &frameCount);
-        if (FAILED(loopHR)) {
-            fprintf(stderr, "\n[Loop %u] BeginUpdatingAudioObjects: "
-                "hr=0x%08X (%s)\n", iter, (unsigned)loopHR, HRName(loopHR));
-            break;
-        }
-
-        if (iter % 100 == 0)
-            printf("[Loop %4u] available=%u frameCount=%u angle=%.2f\n",
-                iter, available, frameCount, orbAngle);
-
-        WriteFrame(objects, 4, freqs, sr, phases, frameCount, orbAngle, dt);
-
-        loopHR = stream->EndUpdatingAudioObjects();
-        if (FAILED(loopHR)) {
-            fprintf(stderr, "\n[Loop %u] EndUpdatingAudioObjects: "
-                "hr=0x%08X (%s)\n", iter, (unsigned)loopHR, HRName(loopHR));
+        if (!DoFrame(stream, rawPtrs, sr, dt, iter, loopHR)) {
+            if (IsDeviceGone(loopHR))
+                printf("\n[Info] Spatial audio was turned off (hr=0x%08X). Stopping.\n",
+                    (unsigned)loopHR);
             break;
         }
         ++iter;
-        Sleep(static_cast<DWORD>(dt * 1000.f));
+        Sleep((DWORD)(dt * 1000.f));
     }
 
     timeEndPeriod(1);
@@ -251,61 +377,65 @@ static int RunOpenALLoop(
 }
 
 // ----------------------------------------------------------------
-// MSSAPI render loop
-//
-// The real ISpatialAudioClient is event-driven: Windows signals
-// hEvent when it is ready for the next frame. We must wait on that
-// event rather than sleeping, otherwise ActivateSpatialAudioStream
-// returns E_INVALIDARG (null EventHandle is rejected by the real
-// stack, though our shim accepts it).
+// MSSAPI render loop -- event-driven (WaitForSingleObject)
+// The real ISpatialAudioClient requires a non-null EventHandle and
+// signals it when it is ready for each new frame.
 // ----------------------------------------------------------------
 static int RunMSSAPILoop(
     ISpatialAudioObjectRenderStream* stream,
-    ISpatialAudioObject* objects[4],
+    ISpatialAudioObject* rawPtrs[4],
     const WAVEFORMATEX& wfx,
     HANDLE hEvent)
 {
-    const float sr = static_cast<float>(wfx.nSamplesPerSec);
-    UINT32 framesPerBuffer = 480; // Will be overridden by BeginUpdating
-
-    float phases[4] = {};
-    float freqs[4]  = { 220.f, 330.f, 440.f, 550.f };
-    float orbAngle  = 0.f;
-    UINT32 iter     = 0;
+    const float sr = (float)wfx.nSamplesPerSec;
+    float dt = 480.f / sr;    // initial estimate; updated each frame
 
     std::atomic<bool> stopFlag{ false };
-    std::thread([&stopFlag] { (void)getchar();
-        stopFlag.store(true, std::memory_order_release); }).detach();
+    std::thread([&stopFlag] {
+        (void)getchar();
+        stopFlag.store(true, std::memory_order_release);
+    }).detach();
 
+    UINT32 iter = 0;
     HRESULT loopHR = S_OK;
     while (!stopFlag.load(std::memory_order_acquire)) {
-        // Windows signals hEvent when it wants the next frame.
-        // 200ms timeout as a safety net so we can check stopFlag.
-        DWORD waitResult = WaitForSingleObject(hEvent, 200);
-        if (waitResult == WAIT_TIMEOUT) continue;
-        if (waitResult != WAIT_OBJECT_0) break;
+        DWORD w = WaitForSingleObject(hEvent, 200);
+        if (w == WAIT_TIMEOUT) continue;
+        if (w != WAIT_OBJECT_0) break;
 
+        // Update dt from actual frameCount on first few frames
         UINT32 available = 0, frameCount = 0;
         loopHR = stream->BeginUpdatingAudioObjects(&available, &frameCount);
         if (FAILED(loopHR)) {
-            fprintf(stderr, "\n[Loop %u] BeginUpdatingAudioObjects: "
-                "hr=0x%08X (%s)\n", iter, (unsigned)loopHR, HRName(loopHR));
+            if (IsDeviceGone(loopHR))
+                printf("\n[Info] Spatial audio was turned off (hr=0x%08X). Stopping.\n",
+                    (unsigned)loopHR);
             break;
         }
-
-        if (frameCount > 0) framesPerBuffer = frameCount;
-        float dt = (float)framesPerBuffer / sr;
+        if (frameCount > 0) dt = (float)frameCount / sr;
 
         if (iter % 100 == 0)
-            printf("[Loop %4u] available=%u frameCount=%u angle=%.2f\n",
-                iter, available, frameCount, orbAngle);
+            printf("[Loop %4u] available=%u frameCount=%u\n",
+                iter, available, frameCount);
 
-        WriteFrame(objects, 4, freqs, sr, phases, frameCount, orbAngle, dt);
+        for (int i = 0; i < 4; ++i) {
+            if (!rawPtrs[i]) continue;
+            BOOL active = FALSE;
+            rawPtrs[i]->IsActive(&active);
+            if (!active) continue;
+            BYTE* buf = nullptr; UINT32 bufLen = 0;
+            if (FAILED(rawPtrs[i]->GetBuffer(&buf, &bufLen)) || !buf) continue;
+            float ox=0,oy=0,oz=0;
+            gObjs[i].tick(reinterpret_cast<float*>(buf),
+                          frameCount, sr, dt, ox, oy, oz);
+            rawPtrs[i]->SetPosition(ox, oy, oz);
+        }
 
         loopHR = stream->EndUpdatingAudioObjects();
         if (FAILED(loopHR)) {
-            fprintf(stderr, "\n[Loop %u] EndUpdatingAudioObjects: "
-                "hr=0x%08X (%s)\n", iter, (unsigned)loopHR, HRName(loopHR));
+            if (IsDeviceGone(loopHR))
+                printf("\n[Info] Spatial audio was turned off (hr=0x%08X). Stopping.\n",
+                    (unsigned)loopHR);
             break;
         }
         ++iter;
@@ -317,11 +447,10 @@ static int RunMSSAPILoop(
 }
 
 // ----------------------------------------------------------------
-// Shared stream setup (format check, activation, object creation)
+// Shared stream setup
 // ----------------------------------------------------------------
 static int SetupAndRun(ISpatialAudioClient* client,
-                        const WAVEFORMATEX& wfx,
-                        Mode mode)
+                        const WAVEFORMATEX& wfx, Mode mode)
 {
     UINT32 framesPerBuffer = 0;
     if (!CHECK(client->GetMaxFrameCount(&wfx, &framesPerBuffer))) return 1;
@@ -330,8 +459,6 @@ static int SetupAndRun(ISpatialAudioClient* client,
 
     printf("[Step 4] Activating render stream...\n");
 
-    // The real Windows ISpatialAudioClient rejects a null EventHandle.
-    // Create an auto-reset event for MSSAPI mode; our shim accepts either.
     HANDLE hEvent = nullptr;
     if (mode == Mode::MSSAPI) {
         hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -346,12 +473,11 @@ static int SetupAndRun(ISpatialAudioClient* client,
     sp.StaticObjectTypeMask  = AudioObjectType_None;
     sp.MaxDynamicObjectCount = 4;
     sp.Category              = AudioCategory_GameEffects;
-    sp.EventHandle           = hEvent;    // non-null for MSSAPI, null for OpenAL
+    sp.EventHandle           = hEvent;
     sp.NotifyObject          = nullptr;
 
-    PROPVARIANT pv;
-    PropVariantInit(&pv);
-    pv.vt             = VT_BLOB;
+    PROPVARIANT pv; PropVariantInit(&pv);
+    pv.vt = VT_BLOB;
     pv.blob.cbSize    = sizeof(sp);
     pv.blob.pBlobData = reinterpret_cast<BYTE*>(&sp);
 
@@ -378,12 +504,13 @@ static int SetupAndRun(ISpatialAudioClient* client,
         char tag[48]; sprintf_s(tag, "ActivateSpatialAudioObject[%d]", i);
         HRESULT hr = stream->ActivateSpatialAudioObject(
             AudioObjectType_Dynamic, objPtrs[i].GetAddressOf());
-        if (!CHK(hr, tag)) { stream->Stop(); if (hEvent) CloseHandle(hEvent); return 1; }
+        if (!CHK(hr, tag)) {
+            stream->Stop(); if (hEvent) CloseHandle(hEvent); return 1;
+        }
         rawPtrs[i] = objPtrs[i].Get();
     }
     printf("\n");
 
-    // Extended per-object params (only meaningful in openal mode)
     if (mode == Mode::OpenAL) {
         ComPtr<OpenALSpatial::IOpenALSpatialAudioClient> ext;
         ComPtr<IUnknown>(client).As(&ext);
@@ -392,8 +519,8 @@ static int SetupAndRun(ISpatialAudioClient* client,
             for (int i = 0; i < 4; ++i) {
                 OpenALSpatial::ObjectSpatialParams osp;
                 osp.referenceDistance = 1.0f;
-                osp.maxDistance       = 20.0f;
-                osp.rolloffFactor     = 1.0f;
+                osp.maxDistance       = 30.0f;
+                osp.rolloffFactor     = 0.8f;
                 osp.distModel =
                     OpenALSpatial::DistanceModel::InverseDistanceClamped;
                 ext->SetObjectSpatialParams(rawPtrs[i], osp);
@@ -402,7 +529,11 @@ static int SetupAndRun(ISpatialAudioClient* client,
         }
     }
 
-    printf("Stream running. 4 objects orbiting the listener.\n");
+    printf("Stream running.\n");
+    printf("  [0] Continuous pink noise  -- wide slow orbit\n");
+    printf("  [1] Intermittent pink noise -- tight reverse orbit, bursts\n");
+    printf("  [2] Low tone (110 Hz)       -- figure-eight path\n");
+    printf("  [3] High tone (880 Hz)      -- fast circle overhead\n");
     printf("Press Enter to stop...\n\n");
 
     int ret;
@@ -411,17 +542,26 @@ static int SetupAndRun(ISpatialAudioClient* client,
     else
         ret = RunMSSAPILoop(stream.Get(), rawPtrs, wfx, hEvent);
 
-    // Clean up objects before stopping
+    // Drain gracefully
     {
-        UINT32 d1 = 0, d2 = 0;
+        UINT32 d1=0,d2=0;
         if (SUCCEEDED(stream->BeginUpdatingAudioObjects(&d1, &d2))) {
-            for (auto& obj : objPtrs) if (obj) obj->SetEndOfStream(0);
+            for (auto& o : objPtrs) if (o) o->SetEndOfStream(0);
             stream->EndUpdatingAudioObjects();
         }
     }
     Sleep(50);
-    CHECK(stream->Stop());
-    for (auto& obj : objPtrs) obj.Reset();
+
+    HRESULT stopHR = stream->Stop();
+    if (FAILED(stopHR) && !IsDeviceGone(stopHR))
+        fprintf(stderr, "  [FAIL] stream->Stop()  hr=0x%08X (%s)\n",
+            (unsigned)stopHR, HRName(stopHR));
+    else if (SUCCEEDED(stopHR))
+        printf("  [OK]   stream->Stop()\n");
+    else
+        printf("  [--]   stream->Stop() -- spatial audio already gone, that's fine.\n");
+
+    for (auto& o : objPtrs) o.Reset();
     if (hEvent) CloseHandle(hEvent);
     return ret;
 }
@@ -433,6 +573,9 @@ int main(int argc, char* argv[])
 {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+    // Disable QuickEdit so clicking the console window doesn't freeze audio
+    DisableConsoleQuickEdit();
+
     Mode mode = Mode::OpenAL;
     for (int i = 1; i < argc; ++i) {
         if (_stricmp(argv[i], "--mode") == 0 && i + 1 < argc) {
@@ -443,7 +586,7 @@ int main(int argc, char* argv[])
                 fprintf(stderr,
                     "Unknown mode '%s'.\n"
                     "Usage: BasicExample.exe [--mode openal|mssapi]\n"
-                    "  openal  Direct -> OpenAL Soft (default, no registration needed)\n"
+                    "  openal  Direct -> OpenAL Soft (default; no registration needed)\n"
                     "  mssapi  Real Windows Spatial Audio stack (needs active provider)\n",
                     argv[i]);
                 CoUninitialize(); return 1;
@@ -451,14 +594,18 @@ int main(int argc, char* argv[])
         }
     }
 
+    InitObjects();
+
     printf("OpenAL Spatial Audio -- Basic Example\n");
     printf("======================================\n");
     if (mode == Mode::OpenAL) {
-        printf("Mode: openal  (direct -> OpenAL Soft, Windows Audio bypassed)\n");
-        printf("Tip:  For the Windows Audio route, use: BasicExample.exe --mode mssapi\n");
+        printf("Mode: openal  (direct -> OpenAL Soft, Windows Spatial Audio bypassed)\n");
+        printf("Tip:  For the Windows Spatial Audio route, run with --mode mssapi\n");
+        printf("      (requires a spatial sound provider active in Sound settings)\n");
     } else {
         printf("Mode: mssapi  (real Windows Spatial Audio stack)\n");
-        printf("Tip:  For the direct OpenAL route, use: BasicExample.exe --mode openal\n");
+        printf("Tip:  For the direct OpenAL Soft route, run with --mode openal\n");
+        printf("      (works without any spatial sound provider registered)\n");
     }
     printf("\n");
 
@@ -482,8 +629,7 @@ int main(int argc, char* argv[])
         if (!client) {
             fprintf(stderr,
                 "  [FAIL] CreateClient returned null.\n"
-                "  Ensure openal32.dll or soft_oal.dll is on PATH or\n"
-                "  beside this executable.\n");
+                "  Ensure openal32.dll or soft_oal.dll is on PATH or beside this exe.\n");
             CoUninitialize(); return 1;
         }
         printf("  [OK]   OpenAL Soft client created.\n\n");
@@ -500,7 +646,7 @@ int main(int argc, char* argv[])
             wprintf(L"  Datasets   : %u\n", n);
             if (n && names) {
                 wchar_t* p = names;
-                for (UINT32 k = 0; k < n; ++k, p += wcslen(p) + 1)
+                for (UINT32 k = 0; k < n; ++k, p += wcslen(p)+1)
                     wprintf(L"    [%u] %s\n", k, p);
                 CoTaskMemFree(names);
             }
@@ -508,7 +654,7 @@ int main(int argc, char* argv[])
         printf("\n");
 
     } else {
-        printf("[Step 1] Creating ISpatialAudioClient via Windows Audio...\n");
+        printf("[Step 1] Creating ISpatialAudioClient via Windows Spatial Audio...\n");
         if (FAILED(CreateMSSAPIClient(client))) { CoUninitialize(); return 1; }
         printf("  [OK]   Windows Spatial Audio client created.\n\n");
         printf("[Step 2] (HRTF enumeration not available in mssapi mode)\n\n");

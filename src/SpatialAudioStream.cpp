@@ -1,17 +1,20 @@
 /**
  * SpatialAudioStream.cpp
  * ============================================================
- * ISpatialAudioObjectRenderStream implementation.
+ * ISpatialAudioObjectRenderStream -- synchronous model.
  *
- * Manages the per-frame update loop, the high-priority AL upload
- * thread, EFX reverb attachment, and listener orientation updates.
+ * The upload is driven directly by EndUpdatingAudioObjects() on
+ * the app thread. There is no independent render thread and no
+ * second clock. This matches the Windows Spatial Audio event
+ * model exactly and eliminates the inter-clock drift that caused
+ * stuttering in the previous two-thread design.
  * ============================================================
  */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <avrt.h>          // AvSetMmThreadCharacteristics
+#include <avrt.h>
 #include <spatialaudioclient.h>
 #include <al.h>
 #include <alc.h>
@@ -21,12 +24,9 @@
 
 #pragma comment(lib, "avrt.lib")
 
-#include <chrono>
-#include <cmath>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
-#include <thread>
 
 #include "SpatialAudioStream.h"
 
@@ -44,9 +44,9 @@
 
 namespace OpenALSpatial {
 
-// ─────────────────────────────────────────────────────────────
-// EFX function loader
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// EFX loader
+// -------------------------------------------------------------
 void EFXFunctions::Load(ALCcontext* ctx)
 {
     (void)ctx;
@@ -66,9 +66,9 @@ void EFXFunctions::Load(ALCcontext* ctx)
     OAL_LOG(L"EFX loaded=" << loaded);
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Factory
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 std::shared_ptr<SpatialAudioStreamImpl> SpatialAudioStreamImpl::Create(
     ALCdevice*  device,
     ALCcontext* ctx,
@@ -78,38 +78,36 @@ std::shared_ptr<SpatialAudioStreamImpl> SpatialAudioStreamImpl::Create(
 {
     auto s = std::make_shared<SpatialAudioStreamImpl>(PrivateToken{});
 
-    s->device_  = device;
-    s->ctx_     = ctx;
-    s->notify_  = notify;
+    s->device_    = device;
+    s->ctx_       = ctx;
+    s->notify_    = notify;
     s->reverbMix_ = hrtfCfg.reverbMix;
 
-    // Derive parameters from activation params
     if (params.ObjectFormat) {
-        s->sampleRate_   = params.ObjectFormat->nSamplesPerSec;
-        s->numChannels_  = params.ObjectFormat->nChannels;
+        s->sampleRate_  = params.ObjectFormat->nSamplesPerSec;
+        s->numChannels_ = params.ObjectFormat->nChannels;
         std::memcpy(&s->wfx_, params.ObjectFormat, sizeof(WAVEFORMATEX));
     } else {
-        s->sampleRate_   = kDefaultSampleRate;
-        s->numChannels_  = 1;
+        s->sampleRate_  = kDefaultSampleRate;
+        s->numChannels_ = 1;
     }
-    s->framesPerBuffer_ = s->sampleRate_ / 100;  // 10 ms
-    s->maxDynObjects_   = std::min(
-        params.MaxDynamicObjectCount, kMaxDynamicObjects);
+    s->framesPerBuffer_ = s->sampleRate_ / 100;   // 10 ms
+    s->maxDynObjects_   = std::min(params.MaxDynamicObjectCount,
+                                    kMaxDynamicObjects);
 
-    // Enable per-source distance model so each object can override
-    if (alIsExtensionPresent("AL_EXT_source_distance_model")) {
+    // Enable per-source distance model override
+    if (alIsExtensionPresent("AL_EXT_source_distance_model"))
         alEnable(AL_SOURCE_DISTANCE_MODEL);
-    }
     alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED);
 
-    // Set up EFX reverb if requested
     if (hrtfCfg.enableReverb &&
-        alcIsExtensionPresent(device, "ALC_EXT_EFX")) {
+        alcIsExtensionPresent(device, "ALC_EXT_EFX"))
+    {
         s->efx_.Load(ctx);
         if (s->efx_.loaded) s->InitReverb();
     }
 
-    OAL_LOG(L"Stream created – sr=" << s->sampleRate_
+    OAL_LOG(L"Stream created - sr=" << s->sampleRate_
         << L" maxDyn=" << s->maxDynObjects_);
     return s;
 }
@@ -121,9 +119,9 @@ SpatialAudioStreamImpl::~SpatialAudioStreamImpl()
     OAL_LOG(L"Stream destroyed");
 }
 
-// ─────────────────────────────────────────────────────────────
-// EFX reverb setup (medium-room preset as default)
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// EFX reverb
+// -------------------------------------------------------------
 void SpatialAudioStreamImpl::InitReverb()
 {
     if (!efx_.alGenEffects) return;
@@ -131,7 +129,6 @@ void SpatialAudioStreamImpl::InitReverb()
     efx_.alGenEffects(1, &efxEffect_);
     efx_.alEffecti(efxEffect_, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
 
-    // Use EFX_REVERB_PRESET_GENERIC as a sensible default
     EFXEAXREVERBPROPERTIES preset = EFX_REVERB_PRESET_GENERIC;
     efx_.alEffectf(efxEffect_, AL_EAXREVERB_DENSITY,           preset.flDensity);
     efx_.alEffectf(efxEffect_, AL_EAXREVERB_DIFFUSION,         preset.flDiffusion);
@@ -152,7 +149,7 @@ void SpatialAudioStreamImpl::InitReverb()
 
     efx_.alGenAuxiliaryEffectSlots(1, &efxSlot_);
     efx_.alAuxiliaryEffectSloti(efxSlot_, AL_EFFECTSLOT_EFFECT, (ALint)efxEffect_);
-    efx_.alAuxiliaryEffectSlotf(efxSlot_, AL_EFFECTSLOT_GAIN, reverbMix_);
+    efx_.alAuxiliaryEffectSlotf(efxSlot_, AL_EFFECTSLOT_GAIN,   reverbMix_);
 
     reverbActive_ = (alGetError() == AL_NO_ERROR);
     OAL_LOG(L"EFX reverb " << (reverbActive_ ? L"active" : L"failed"));
@@ -161,27 +158,40 @@ void SpatialAudioStreamImpl::InitReverb()
 void SpatialAudioStreamImpl::DestroyReverb()
 {
     if (!efx_.loaded) return;
-    if (efxSlot_)   { efx_.alDeleteAuxiliaryEffectSlots(1, &efxSlot_); efxSlot_ = 0; }
-    if (efxEffect_) { efx_.alDeleteEffects(1, &efxEffect_); efxEffect_ = 0; }
+    if (efxSlot_)   { efx_.alDeleteAuxiliaryEffectSlots(1, &efxSlot_);  efxSlot_    = 0; }
+    if (efxEffect_) { efx_.alDeleteEffects(1, &efxEffect_);             efxEffect_  = 0; }
     reverbActive_ = false;
 }
 
 void SpatialAudioStreamImpl::AttachReverbToSource(ALuint src)
 {
     if (!reverbActive_ || !efxSlot_) return;
-    // Send source output to the reverb effect slot
     alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)efxSlot_, 0, AL_FILTER_NULL);
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Stream lifecycle
-// ─────────────────────────────────────────────────────────────
+//
+// Start() makes the OpenAL context current on the calling thread.
+// All subsequent BeginUpdating / EndUpdating calls must come from
+// the same thread (or the caller must ensure alcMakeContextCurrent
+// before each call). This matches OpenAL's per-thread context model.
+// -------------------------------------------------------------
 STDMETHODIMP SpatialAudioStreamImpl::Start()
 {
-    if (running_.exchange(true)) return S_OK; // already running
+    if (running_.exchange(true)) return S_OK;
 
-    alThread_ = std::thread([this] { RenderLoop(); });
-    OAL_LOG(L"Stream started");
+    // Make the AL context current on this thread so that all AL
+    // calls in EndUpdatingAudioObjects() work without a separate thread.
+    alcMakeContextCurrent(ctx_);
+
+    // Boost this thread to Pro Audio priority.
+    // AvRevertMmThreadCharacteristics is called in Stop().
+    if (!mmcssHandle_) {
+        mmcssHandle_ = AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcssTaskIdx_);
+    }
+
+    OAL_LOG(L"Stream started (synchronous mode)");
     return S_OK;
 }
 
@@ -189,14 +199,20 @@ STDMETHODIMP SpatialAudioStreamImpl::Stop()
 {
     if (!running_.exchange(false)) return S_OK;
 
-    updateCV_.notify_all();
-    if (alThread_.joinable()) alThread_.join();
+    if (mmcssHandle_) {
+        AvRevertMmThreadCharacteristics(mmcssHandle_);
+        mmcssHandle_ = nullptr;
+    }
 
-    // Stop all sources
+    // Make context current here too in case Stop() is called from
+    // a different thread than Start() (e.g. cleanup on main thread).
+    alcMakeContextCurrent(ctx_);
+
     std::lock_guard<std::mutex> lk(objMutex_);
     for (auto& [ptr, obj] : objects_) {
         if (obj) alSourceStop(obj->GetALSource());
     }
+
     OAL_LOG(L"Stream stopped");
     return S_OK;
 }
@@ -204,26 +220,27 @@ STDMETHODIMP SpatialAudioStreamImpl::Stop()
 STDMETHODIMP SpatialAudioStreamImpl::Reset()
 {
     Stop();
-    std::lock_guard<std::mutex> lk(objMutex_);
-    for (auto& [ptr, obj] : objects_) {
-        if (obj) obj->Reset();
+    {
+        std::lock_guard<std::mutex> lk(objMutex_);
+        for (auto& [ptr, obj] : objects_)
+            if (obj) obj->Reset();
+        objects_.clear();
+        activeDynCount_.store(0);
     }
-    objects_.clear();
-    activeDynCount_.store(0);
     return Start();
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Per-frame update protocol
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 STDMETHODIMP SpatialAudioStreamImpl::BeginUpdatingAudioObjects(
     UINT32* availDynObjects, UINT32* frameCount)
 {
     if (!availDynObjects || !frameCount) return E_POINTER;
-    if (!running_.load()) return AUDCLNT_E_SERVICE_NOT_RUNNING;
-    if (inUpdate_.exchange(true)) return AUDCLNT_E_OUT_OF_ORDER;
+    if (!running_.load())                return AUDCLNT_E_SERVICE_NOT_RUNNING;
+    if (inUpdate_.exchange(true))        return AUDCLNT_E_OUT_OF_ORDER;
 
-    // Reap inactive objects
+    // Reap objects whose app-side COM ref has dropped to zero
     {
         std::lock_guard<std::mutex> lk(objMutex_);
         for (auto it = objects_.begin(); it != objects_.end(); ) {
@@ -247,24 +264,44 @@ STDMETHODIMP SpatialAudioStreamImpl::EndUpdatingAudioObjects()
 {
     if (!inUpdate_.exchange(false)) return AUDCLNT_E_OUT_OF_ORDER;
 
-    // Signal the AL thread to upload the new frames
+    // -- Update AL listener ------------------------------------
+    // Called directly on the app thread (context is current here).
     {
-        std::lock_guard<std::mutex> lk(updateMutex_);
-        updatePending_.store(true, std::memory_order_release);
+        const auto& lo = listener_;
+        ALfloat ori[6] = {
+            lo.fwdX, lo.fwdY, lo.fwdZ,
+            lo.upX,  lo.upY,  lo.upZ
+        };
+        alListenerfv(AL_ORIENTATION, ori);
+        alListener3f(AL_POSITION, lo.posX, lo.posY, lo.posZ);
+        alListener3f(AL_VELOCITY, lo.velX, lo.velY, lo.velZ);
+        alListenerf(AL_GAIN, lo.masterGain);
     }
-    updateCV_.notify_one();
+
+    // -- Upload PCM to AL buffer queue (synchronous) -----------
+    // This is the key change: no signal to a second thread.
+    // The upload happens immediately in the same call, on the same
+    // thread, with zero clock drift relative to the write.
+    UploadAllObjects();
+
+    // -- Optional notify callback ------------------------------
+    if (notify_) {
+        UINT32 avail = maxDynObjects_ -
+            activeDynCount_.load(std::memory_order_relaxed);
+        notify_->OnAvailableDynamicObjectCountChange(this, 0, avail);
+    }
+
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Object activation
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 STDMETHODIMP SpatialAudioStreamImpl::ActivateSpatialAudioObject(
     AudioObjectType type, ISpatialAudioObject** obj)
 {
     if (!obj) return E_POINTER;
 
-    // Dynamic object count check
     if (type == AudioObjectType_Dynamic) {
         UINT32 cur = activeDynCount_.load(std::memory_order_relaxed);
         if (cur >= maxDynObjects_) return SPTLAUDCLNT_E_NO_MORE_OBJECTS;
@@ -274,17 +311,14 @@ STDMETHODIMP SpatialAudioStreamImpl::ActivateSpatialAudioObject(
         type, sampleRate_, framesPerBuffer_, numChannels_);
     if (!impl) return E_OUTOFMEMORY;
 
-    // Attach reverb send
     AttachReverbToSource(impl->GetALSource());
 
-    // Register
     {
         std::lock_guard<std::mutex> lk(objMutex_);
         auto* raw = static_cast<ISpatialAudioObject*>(impl.get());
         objects_[raw] = impl;
-        if (type == AudioObjectType_Dynamic) {
+        if (type == AudioObjectType_Dynamic)
             activeDynCount_.fetch_add(1, std::memory_order_relaxed);
-        }
     }
 
     impl->AddRef();
@@ -294,9 +328,9 @@ STDMETHODIMP SpatialAudioStreamImpl::ActivateSpatialAudioObject(
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Misc ISpatialAudioObjectRenderStream
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// Misc
+// -------------------------------------------------------------
 STDMETHODIMP SpatialAudioStreamImpl::GetAvailableDynamicObjectCount(UINT32* count)
 {
     if (!count) return E_POINTER;
@@ -306,7 +340,7 @@ STDMETHODIMP SpatialAudioStreamImpl::GetAvailableDynamicObjectCount(UINT32* coun
 
 STDMETHODIMP SpatialAudioStreamImpl::GetService(REFIID riid, void** service)
 {
-    (void)riid;   // intentionally unsupported; suppress C4100
+    (void)riid;
     if (!service) return E_POINTER;
     *service = nullptr;
     return E_NOINTERFACE;
@@ -329,24 +363,21 @@ STDMETHODIMP SpatialAudioStreamImpl::QueryInterface(REFIID riid, void** ppv)
 
 STDMETHODIMP_(ULONG) SpatialAudioStreamImpl::Release()
 {
-    // Do NOT delete here. Memory is owned by the shared_ptr stored in
-    // OpenALSpatialAudioClientImpl::activeStream_. Calling delete this
-    // while that shared_ptr is still alive causes a double-free.
     return --refCount_;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Listener orientation update (thread-safe)
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
+// Listener orientation (no mutex needed: called only from app
+// thread between Begin/EndUpdating, same thread as End which reads it)
+// -------------------------------------------------------------
 void SpatialAudioStreamImpl::SetListenerOrientation(const ListenerOrientation& lo)
 {
-    std::lock_guard<std::mutex> lk(listenerMutex_);
     listener_ = lo;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Extended spatial params
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 HRESULT SpatialAudioStreamImpl::SetObjectSpatialParams(
     ISpatialAudioObject* obj, const ObjectSpatialParams& p)
 {
@@ -358,83 +389,15 @@ HRESULT SpatialAudioStreamImpl::SetObjectSpatialParams(
     return S_OK;
 }
 
-// ─────────────────────────────────────────────────────────────
-// AL render loop – runs on dedicated high-priority thread
-// ─────────────────────────────────────────────────────────────
-void SpatialAudioStreamImpl::RenderLoop()
-{
-    // Request Pro Audio thread priority from Windows
-    DWORD taskIndex = 0;
-    HANDLE mmcssHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
-
-    alcMakeContextCurrent(ctx_);
-
-    OAL_LOG(L"AL render thread started");
-
-    using Clock = std::chrono::steady_clock;
-    const auto period = std::chrono::microseconds(
-        static_cast<long long>(framesPerBuffer_ * 1000000.0 / sampleRate_));
-
-    auto nextWake = Clock::now() + period;
-
-    while (running_.load(std::memory_order_acquire)) {
-        // Wait for EndUpdatingAudioObjects or timeout (1 period)
-        {
-            std::unique_lock<std::mutex> lk(updateMutex_);
-            updateCV_.wait_until(lk, nextWake, [this] {
-                return updatePending_.load(std::memory_order_acquire)
-                    || !running_.load(std::memory_order_acquire);
-            });
-            updatePending_.store(false, std::memory_order_release);
-        }
-
-        if (!running_.load(std::memory_order_acquire)) break;
-
-        // ── Update listener ───────────────────────────────────
-        {
-            std::lock_guard<std::mutex> lk(listenerMutex_);
-            const auto& lo = listener_;
-            ALfloat ori[6] = {
-                lo.fwdX, lo.fwdY, lo.fwdZ,
-                lo.upX,  lo.upY,  lo.upZ
-            };
-            alListenerfv(AL_ORIENTATION, ori);
-            alListener3f(AL_POSITION, lo.posX, lo.posY, lo.posZ);
-            alListener3f(AL_VELOCITY, lo.velX, lo.velY, lo.velZ);
-            alListenerf(AL_GAIN, lo.masterGain);
-        }
-
-        // ── Upload pending audio frames ───────────────────────
-        UploadAllObjects();
-
-        // ── Notify app that next cycle can begin ─────────────
-        if (notify_) {
-            UINT32 avail = maxDynObjects_ -
-                activeDynCount_.load(std::memory_order_relaxed);
-            notify_->OnAvailableDynamicObjectCountChange(
-                this,   // ISpatialAudioObjectRenderStreamBase* sender
-                0,      // LONGLONG hnsComplianceDeadlineTime
-                avail); // UINT32 availableDynamicObjectCountChange
-        }
-
-        nextWake += period;
-        // If we've fallen behind, resync
-        if (Clock::now() > nextWake + period * 4) {
-            nextWake = Clock::now() + period;
-        }
-    }
-
-    if (mmcssHandle) AvRevertMmThreadCharacteristics(mmcssHandle);
-    OAL_LOG(L"AL render thread exiting");
-}
-
+// -------------------------------------------------------------
+// Upload -- called directly from EndUpdatingAudioObjects()
+// -------------------------------------------------------------
 void SpatialAudioStreamImpl::UploadAllObjects()
 {
     std::lock_guard<std::mutex> lk(objMutex_);
     for (auto& [ptr, obj] : objects_) {
-        if (obj && obj->IsActive()) {
+        if (obj && obj->IsActive())
             obj->UploadPendingBuffers();
-        }
     }
 }
 
